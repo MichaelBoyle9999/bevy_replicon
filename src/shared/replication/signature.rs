@@ -257,6 +257,18 @@ impl Signature {
         self
     }
 
+    /// The user-defined salt folded into this signature's hash, if any.
+    ///
+    /// Set by [`Self::with_salt`] and [`Self::from`] (which stores the hash of the
+    /// provided value as the salt). Two signatures built from the same salt value
+    /// expose the same result here even before either is added to an entity (the
+    /// resolved [`Self::hash`] is only computed on add), so this is the stable key
+    /// for correlating a salted body across apps — e.g. matching a replicated
+    /// remote player to the local player a peer salted with the same value.
+    pub fn salt(&self) -> Option<u64> {
+        self.salt
+    }
+
     pub(crate) fn client(&self) -> Option<Entity> {
         self.client
     }
