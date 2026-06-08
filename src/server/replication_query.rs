@@ -13,7 +13,11 @@ use bevy::{
 };
 use log::debug;
 
-use crate::{prelude::*, shared::replication::rules::ReplicationRules};
+use crate::{
+    prelude::*,
+    server::confirmed_source::{ConfirmedLookup, ConfirmedLookupFn},
+    shared::replication::rules::ReplicationRules,
+};
 
 /// Like [`Query`], but provides dynamic access only for replicated components.
 ///
@@ -67,6 +71,26 @@ impl<'w> ReplicationQuery<'w, '_> {
                 (component, ticks)
             },
         }
+    }
+
+    /// Consults a confirmed-value source for `component` on `entity` at `tick`,
+    /// using this query's world access. Returns whether to serialize the live
+    /// value, a confirmed value from history, or to withhold the component. See
+    /// [`ConfirmedReplicationSource`](crate::server::confirmed_source::ConfirmedReplicationSource).
+    ///
+    /// # Safety
+    ///
+    /// `lookup` must obey the [`ConfirmedLookupFn`] contract — read-only world
+    /// access and a correctly-typed returned pointer.
+    pub(super) unsafe fn confirmed_lookup(
+        &self,
+        lookup: ConfirmedLookupFn,
+        entity: Entity,
+        component_id: ComponentId,
+        tick: RepliconTick,
+    ) -> ConfirmedLookup<'w> {
+        // SAFETY: caller upholds the `ConfirmedLookupFn` contract.
+        unsafe { lookup(self.world, entity, component_id, tick) }
     }
 }
 

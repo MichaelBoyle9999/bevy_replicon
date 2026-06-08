@@ -1,4 +1,5 @@
 pub mod client_pools;
+pub mod confirmed_source;
 pub mod message;
 pub mod related_entities;
 pub(super) mod removal_buffer;
@@ -49,6 +50,7 @@ use crate::{
     },
 };
 use client_pools::ClientPools;
+use confirmed_source::{ConfirmedLookup, ConfirmedReplicationSource};
 use related_entities::RelatedEntities;
 use removal_buffer::RemovalBuffer;
 use replication_messages::{
@@ -123,6 +125,7 @@ impl Plugin for ServerPlugin {
             .init_resource::<ServerChangeTick>()
             .init_resource::<ClientPools>()
             .init_resource::<ReplicatedArchetypes>()
+            .init_resource::<ConfirmedReplicationSource>()
             .init_resource::<MessageBuffer>()
             .init_resource::<RelatedEntities>()
             .init_resource::<FilterRegistry>()
@@ -621,6 +624,7 @@ fn collect_changes(
     query: ReplicationQuery,
     server_tick: Res<ServerTick>,
     change_tick: Res<ServerChangeTick>,
+    confirmed_source: Res<ConfirmedReplicationSource>,
     registry: Res<ReplicationRegistry>,
     filter_registry: Res<FilterRegistry>,
     type_registry: Res<AppTypeRegistry>,
@@ -656,13 +660,32 @@ fn collect_changes(
                 let (component_index, component_id, fns) = registry.get(rule.fns_id);
 
                 // SAFETY: component and storage were obtained from this archetype.
-                let (ptr, ticks) = unsafe {
+                let (live_ptr, ticks) = unsafe {
                     query.get_component_unchecked(
                         entity,
                         archetype.table_id(),
                         storage,
                         component_id,
                     )
+                };
+
+                // Resolve the value to serialize. With no confirmed source installed
+                // (the default) this is the live component, unchanged. With a source, a
+                // confirmed (past-tick) value from history replaces it; a component not
+                // yet confirmed at `server_tick` is withheld this frame (never the live,
+                // unconfirmed present). Only the *value* is redirected — change detection
+                // (below) stays on the live component's ticks.
+                let ptr = match confirmed_source.lookup() {
+                    // SAFETY: the installed lookup obeys the `ConfirmedLookupFn` contract;
+                    // any returned `Ptr` is of the same type as `component_id`'s storage.
+                    Some(lookup) => match unsafe {
+                        query.confirmed_lookup(lookup, entity.id(), component_id, **server_tick)
+                    } {
+                        ConfirmedLookup::Live => live_ptr,
+                        ConfirmedLookup::Confirmed(ptr) => ptr,
+                        ConfirmedLookup::Unconfirmed => continue,
+                    },
+                    None => live_ptr,
                 };
 
                 // SAFETY: `fns` and `ptr` were created for the same component type.

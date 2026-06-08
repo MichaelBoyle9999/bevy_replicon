@@ -740,6 +740,7 @@ pub mod prelude {
     #[expect(deprecated, reason = "Re-export of deprecated aliases")]
     pub use super::server::{
         AuthorizedClient, PriorityMap, ServerPlugin, ServerSystems,
+        confirmed_source::{ConfirmedLookup, ConfirmedLookupFn, ConfirmedReplicationSource},
         message::ServerMessagePlugin,
         related_entities::SyncRelatedAppExt,
         visibility::{
