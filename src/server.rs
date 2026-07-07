@@ -530,6 +530,23 @@ fn collect_removals(
         }
 
         for &(component_index, fns_id) in remove_ids {
+            // A removal whose component is present again at send time is not a
+            // removal from the client's perspective: replication mirrors
+            // end-of-tick state, and a component removed and re-inserted within
+            // one tick (e.g. a rollback resimulation stripping a component
+            // ahead of its insert tick and replaying it back) reaches the
+            // client as an ordinary change via `collect_changes`. Sending the
+            // stale removal would follow (or race) that value and plant a
+            // terminal removal in the client's view of a still-present
+            // component.
+            if let Ok(location) = entities.get_spawned(entity)
+                && let Some(&(id, _)) = registry.get_by_index(component_index)
+                && let Some(archetype) = archetypes.get(location.archetype_id)
+                && archetype.contains(id)
+            {
+                trace!("skipping `{fns_id:?}` removal for `{entity}`: re-inserted this tick");
+                continue;
+            }
             let mut fns_id_range = None;
             for (client, mut message, mut ticks, _) in &mut clients {
                 // Only send removals for components that were previously sent.

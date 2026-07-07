@@ -51,6 +51,56 @@ fn single() {
     assert_eq!(components.iter(client_app.world()).len(), 0);
 }
 
+/// A component removed and re-inserted within the same server tick is present
+/// at send time, so no removal must reach the client — replication mirrors
+/// end-of-tick state, not intra-tick churn. This is exactly what a rollback
+/// resimulation does every time it reaches back past a component's insert
+/// tick (strip, then replay the insert), so a stale removal here would
+/// repeatedly tell clients a still-present component was removed.
+#[test]
+fn removed_and_reinserted_same_tick() {
+    let mut server_app = App::new();
+    let mut client_app = App::new();
+    for app in [&mut server_app, &mut client_app] {
+        app.add_plugins((
+            MinimalPlugins,
+            StatesPlugin,
+            RepliconPlugins.set(ServerPlugin::new(PostUpdate)),
+        ))
+        .replicate::<A>()
+        .finish();
+    }
+
+    server_app.connect_client(&mut client_app);
+
+    let server_entity = server_app.world_mut().spawn((Replicated, A)).id();
+
+    server_app.update();
+    server_app.exchange_with_client(&mut client_app);
+    client_app.update();
+    server_app.exchange_with_client(&mut client_app);
+
+    let mut components = client_app.world_mut().query::<&A>();
+    assert_eq!(components.iter(client_app.world()).len(), 1);
+
+    server_app
+        .world_mut()
+        .entity_mut(server_entity)
+        .remove::<A>()
+        .insert(A);
+
+    server_app.update();
+    server_app.exchange_with_client(&mut client_app);
+    client_app.update();
+
+    assert_eq!(
+        components.iter(client_app.world()).len(),
+        1,
+        "a component present at send time must not replicate as removed, \
+         even if it was briefly removed earlier in the tick"
+    );
+}
+
 #[test]
 fn multiple() {
     let mut server_app = App::new();
