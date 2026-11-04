@@ -1,5 +1,5 @@
 use bevy::{
-    ecs::{component::ComponentId, world::unsafe_world_cell::UnsafeWorldCell},
+    ecs::{component::ComponentId, system::SystemState, world::unsafe_world_cell::UnsafeWorldCell},
     prelude::*,
     ptr::Ptr,
     state::app::StatesPlugin,
@@ -107,6 +107,8 @@ fn removed_and_reinserted_same_tick() {
         "a component present at send time must not replicate as removed, \
          even if it was briefly removed earlier in the tick"
     );
+    let mut removals: SystemState<RemovedComponents<A>> = SystemState::new(client_app.world_mut());
+    assert!(removals.get(client_app.world()).is_empty());
 }
 
 /// With a confirmed source, the live component runs ahead of the replicated

@@ -1,4 +1,4 @@
-use bevy::{ecs::system::SystemState, prelude::*, state::app::StatesPlugin};
+use bevy::{prelude::*, state::app::StatesPlugin};
 use bevy_replicon::{
     client::confirm_history::{ConfirmHistory, EntityReplicated},
     prelude::*,
@@ -501,53 +501,6 @@ fn not_replicated() {
 
     let mut components = client_app.world_mut().query::<&A>();
     assert_eq!(components.iter(client_app.world()).count(), 0);
-}
-
-#[test]
-fn after_removal() {
-    let mut server_app = App::new();
-    let mut client_app = App::new();
-    for app in [&mut server_app, &mut client_app] {
-        app.add_plugins((
-            MinimalPlugins,
-            StatesPlugin,
-            RepliconPlugins.set(ServerPlugin::new(PostUpdate)),
-        ))
-        .replicate::<A>()
-        .finish();
-    }
-
-    server_app.connect_client(&mut client_app);
-
-    let server_entity = server_app.world_mut().spawn((Replicated, A)).id();
-
-    server_app.update();
-    server_app.exchange_with_client(&mut client_app);
-    client_app.update();
-    server_app.exchange_with_client(&mut client_app);
-
-    // Insert and remove at the same time.
-    server_app
-        .world_mut()
-        .entity_mut(server_entity)
-        .remove::<A>()
-        .insert(A);
-
-    server_app.update();
-    server_app.exchange_with_client(&mut client_app);
-    client_app.update();
-
-    let mut components = client_app.world_mut().query::<&A>();
-    assert_eq!(components.iter(client_app.world()).count(), 1);
-
-    let mut system_state: SystemState<RemovedComponents<A>> =
-        SystemState::new(client_app.world_mut());
-    let removals = system_state.get(client_app.world());
-    assert_eq!(
-        removals.len(),
-        1,
-        "removal for the old value should also be triggered"
-    );
 }
 
 #[test]
