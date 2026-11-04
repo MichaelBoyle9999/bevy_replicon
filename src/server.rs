@@ -674,7 +674,8 @@ enum RemovalStatus {
     /// The replicated state at [`ServerTick`] no longer has the component.
     Released {
         /// The confirmed history records the component removed again later,
-        /// after a re-insertion.
+        /// after a re-insertion, or records it re-inserted while it is absent
+        /// live, so a removal the history has yet to record follows.
         removed_again: bool,
     },
 }
@@ -716,19 +717,21 @@ fn removal_status(
         return live_status();
     };
     // SAFETY: the installed lookups obey the `ConfirmedLookupFn` and
-    // `RemovedAfterFn` contracts.
+    // `ConfirmedAheadFn` contracts.
     let confirmed = unsafe { query.confirmed_lookup(fns.lookup, entity, id, server_tick) };
-    let removed_after =
-        || unsafe { query.removed_after(fns.removed_after, entity, id, server_tick) };
+    let ahead = || unsafe { query.confirmed_ahead(fns.ahead, entity, id, server_tick) };
+    // A removal outside the simulation reaches the history only at the next
+    // tick, so one still absent live stays withheld until it does.
     match confirmed {
         ConfirmedLookup::Live => live_status(),
-        ConfirmedLookup::Removed => RemovalStatus::Released {
-            removed_again: removed_after(),
-        },
-        // A removal outside the simulation reaches the history only at the
-        // next tick, so one still absent live stays withheld until it does.
+        ConfirmedLookup::Removed => {
+            let ahead = ahead();
+            RemovalStatus::Released {
+                removed_again: ahead.removed || (ahead.present && !present_live()),
+            }
+        }
         ConfirmedLookup::Confirmed(_) | ConfirmedLookup::Unconfirmed => {
-            if !removed_after() && present_live() {
+            if !ahead().removed && present_live() {
                 RemovalStatus::Superseded
             } else {
                 RemovalStatus::Withheld

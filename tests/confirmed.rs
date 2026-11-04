@@ -186,6 +186,36 @@ fn removal_after_a_confirmed_reinsertion_is_sent() {
     assert_eq!(values, [None, Some(V(5)), None]);
 }
 
+/// A component removed live outside the simulation reaches the confirmed
+/// history only at the next tick. When that live removal merges into a
+/// withheld removal released the same tick, and the history shows the
+/// component re-inserted after it, the confirmed values of the re-insertion
+/// and the later removal still reach the client.
+#[test]
+fn removal_recorded_after_its_merged_removal_is_released_is_sent() {
+    let (mut server_app, mut client_app) = confirmed_pair();
+    let server_entity = spawn_confirmed(&mut server_app, &mut client_app);
+    let tick = next_send_tick(&server_app);
+    record(&mut server_app, server_entity, tick, None);
+    record(&mut server_app, server_entity, tick + 1, Some(V(5)));
+    server_app
+        .world_mut()
+        .entity_mut(server_entity)
+        .remove::<V>()
+        .insert(V(5))
+        .remove::<V>();
+
+    exchange(&mut server_app, &mut client_app);
+    let mut values = vec![client_value(&mut client_app)];
+    record(&mut server_app, server_entity, tick + 2, None);
+    for _ in 0..2 {
+        exchange(&mut server_app, &mut client_app);
+        values.push(client_value(&mut client_app));
+    }
+
+    assert_eq!(values, [None, Some(V(5)), None]);
+}
+
 /// A withheld removal that the confirmed history stops recording, such as
 /// after a host resimulation undid it, never reaches the client.
 #[test]
@@ -224,7 +254,7 @@ fn confirmed_pair() -> (App, App) {
     server_app
         .world_mut()
         .resource_mut::<ConfirmedReplicationSource>()
-        .set(confirmed_v, confirmed_v_removed_after);
+        .set(confirmed_v, confirmed_v_ahead);
     server_app.connect_client(&mut client_app);
     (server_app, client_app)
 }
@@ -292,18 +322,22 @@ unsafe fn confirmed_v<'w>(
     }
 }
 
-unsafe fn confirmed_v_removed_after(
+unsafe fn confirmed_v_ahead(
     world: UnsafeWorldCell,
     entity: Entity,
     _component: ComponentId,
     tick: RepliconTick,
-) -> bool {
-    confirmed_history(world, entity).is_some_and(|confirmed| {
-        confirmed
-            .0
-            .iter()
-            .any(|&(at, state)| at > tick.get() && state.is_none())
-    })
+) -> ConfirmedAhead {
+    let ahead = confirmed_history(world, entity)
+        .into_iter()
+        .flat_map(|confirmed| &confirmed.0)
+        .filter(|&&(at, _)| at > tick.get());
+    let mut confirmed = ConfirmedAhead::default();
+    for (_, state) in ahead {
+        confirmed.present |= state.is_some();
+        confirmed.removed |= state.is_none();
+    }
+    confirmed
 }
 
 fn confirmed_history(world: UnsafeWorldCell<'_>, entity: Entity) -> Option<&ConfirmedV> {

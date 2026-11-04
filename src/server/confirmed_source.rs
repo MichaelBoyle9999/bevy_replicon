@@ -38,7 +38,7 @@ use crate::shared::replicon_tick::RepliconTick;
 /// confirmed one.
 ///
 /// A live removal is withheld until the lookup returns [`Self::Removed`], and
-/// sent at that `ServerTick`. One that [`RemovedAfterFn`] no longer reports
+/// sent at that `ServerTick`. One that [`ConfirmedAheadFn`] no longer reports
 /// ahead while the component is present live again is dropped.
 pub enum ConfirmedLookup<'w> {
     /// Not history-sourced — replicon serializes the live component, as usual.
@@ -73,27 +73,37 @@ pub type ConfirmedLookupFn = for<'w> unsafe fn(
     RepliconTick,
 ) -> ConfirmedLookup<'w>;
 
-/// Whether the confirmed history of `component` on `entity` records a removal
-/// at a tick after `tick`, reading from the world through the cell.
+/// What the confirmed history of one component on one entity records at the
+/// ticks after a given tick.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct ConfirmedAhead {
+    /// The component is confirmed present at some later tick.
+    pub present: bool,
+    /// The component is confirmed removed at some later tick.
+    pub removed: bool,
+}
+
+/// What the confirmed history of `component` on `entity` records after `tick`,
+/// reading from the world through the cell.
 ///
 /// Only asked for components the [`ConfirmedLookupFn`] reports as
-/// history-sourced. A withheld removal for which this returns `false` while
-/// the component is present live again can no longer reach clients, since the
+/// history-sourced. A withheld removal with no removal ahead while the
+/// component is present live again can no longer reach clients, since the
 /// confirmed state never shows it, so it is dropped. While the component is
-/// still absent live, the history may not have recorded the removal yet, so it
-/// stays withheld.
+/// absent live, the history may not have recorded its removal yet, so a removal
+/// stays withheld while the component is confirmed present ahead.
 ///
 /// # Safety
 ///
 /// The implementation must only *read* through the cell.
-pub type RemovedAfterFn =
-    for<'w> unsafe fn(UnsafeWorldCell<'w>, Entity, ComponentId, RepliconTick) -> bool;
+pub type ConfirmedAheadFn =
+    for<'w> unsafe fn(UnsafeWorldCell<'w>, Entity, ComponentId, RepliconTick) -> ConfirmedAhead;
 
 /// The functions a [`ConfirmedReplicationSource`] reads confirmed history with.
 #[derive(Clone, Copy)]
 pub(crate) struct ConfirmedHistoryFns {
     pub(crate) lookup: ConfirmedLookupFn,
-    pub(crate) removed_after: RemovedAfterFn,
+    pub(crate) ahead: ConfirmedAheadFn,
 }
 
 /// Optional authority-side source of confirmed component values.
@@ -107,11 +117,8 @@ pub struct ConfirmedReplicationSource(Option<ConfirmedHistoryFns>);
 
 impl ConfirmedReplicationSource {
     /// Install the lookups, replacing any previous ones.
-    pub fn set(&mut self, lookup: ConfirmedLookupFn, removed_after: RemovedAfterFn) {
-        self.0 = Some(ConfirmedHistoryFns {
-            lookup,
-            removed_after,
-        });
+    pub fn set(&mut self, lookup: ConfirmedLookupFn, ahead: ConfirmedAheadFn) {
+        self.0 = Some(ConfirmedHistoryFns { lookup, ahead });
     }
 
     /// Remove the lookups, reverting to live-component serialization.

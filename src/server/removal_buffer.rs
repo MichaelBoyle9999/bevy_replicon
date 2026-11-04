@@ -408,7 +408,7 @@ mod tests {
         let (mut app, entity) = withheld_app();
         let mut entity_mut = app.world_mut().entity_mut(entity);
         entity_mut.insert(A);
-        entity_mut.get_mut::<ConfirmedA>().unwrap().removed_after = false;
+        entity_mut.get_mut::<ConfirmedA>().unwrap().ahead.removed = false;
 
         app.update();
 
@@ -422,12 +422,47 @@ mod tests {
         app.world_mut()
             .get_mut::<ConfirmedA>(entity)
             .unwrap()
-            .removed_after = false;
+            .ahead
+            .removed = false;
 
         app.update();
 
         let removal_buffer = app.world().resource::<RemovalBuffer>();
         assert_eq!(removal_buffer.withheld_of(entity).len(), 1);
+    }
+
+    #[test]
+    fn released_removal_stays_withheld_while_reinserted_ahead_and_absent_live() {
+        let (mut app, entity) = withheld_app();
+        let mut confirmed = app.world_mut().get_mut::<ConfirmedA>(entity).unwrap();
+        confirmed.removed = true;
+        confirmed.ahead = ConfirmedAhead {
+            present: true,
+            removed: false,
+        };
+
+        app.update();
+
+        let removal_buffer = app.world().resource::<RemovalBuffer>();
+        assert_eq!(removal_buffer.withheld_of(entity).len(), 1);
+    }
+
+    #[test]
+    fn released_removal_reinserted_ahead_and_present_live_is_dropped() {
+        let (mut app, entity) = withheld_app();
+        let mut entity_mut = app.world_mut().entity_mut(entity);
+        entity_mut.insert(A);
+        let mut confirmed = entity_mut.get_mut::<ConfirmedA>().unwrap();
+        confirmed.removed = true;
+        confirmed.ahead = ConfirmedAhead {
+            present: true,
+            removed: false,
+        };
+
+        app.update();
+
+        let removal_buffer = app.world().resource::<RemovalBuffer>();
+        assert!(removal_buffer.withheld_of(entity).is_empty());
     }
 
     #[test]
@@ -446,7 +481,7 @@ mod tests {
         let (mut app, entity) = withheld_app();
         let mut confirmed = app.world_mut().get_mut::<ConfirmedA>(entity).unwrap();
         confirmed.removed = true;
-        confirmed.removed_after = false;
+        confirmed.ahead.removed = false;
 
         app.update();
 
@@ -468,7 +503,7 @@ mod tests {
         .finish();
         app.world_mut()
             .resource_mut::<ConfirmedReplicationSource>()
-            .set(confirmed_a, confirmed_a_removed_after);
+            .set(confirmed_a, confirmed_a_ahead);
         app.world_mut()
             .resource_mut::<NextState<ServerState>>()
             .set(ServerState::Running);
@@ -482,7 +517,10 @@ mod tests {
                 ConfirmedA {
                     value: A,
                     removed: false,
-                    removed_after: true,
+                    ahead: ConfirmedAhead {
+                        present: false,
+                        removed: true,
+                    },
                 },
             ))
             .remove::<A>()
@@ -503,7 +541,7 @@ mod tests {
     struct ConfirmedA {
         value: A,
         removed: bool,
-        removed_after: bool,
+        ahead: ConfirmedAhead,
     }
 
     unsafe fn confirmed_a<'w>(
@@ -519,13 +557,14 @@ mod tests {
         }
     }
 
-    unsafe fn confirmed_a_removed_after(
+    unsafe fn confirmed_a_ahead(
         world: UnsafeWorldCell<'_>,
         entity: Entity,
         _component: ComponentId,
         _tick: RepliconTick,
-    ) -> bool {
-        confirmed_of(world, entity).is_some_and(|confirmed| confirmed.removed_after)
+    ) -> ConfirmedAhead {
+        confirmed_of(world, entity)
+            .map_or_else(ConfirmedAhead::default, |confirmed| confirmed.ahead)
     }
 
     fn confirmed_of(world: UnsafeWorldCell<'_>, entity: Entity) -> Option<&ConfirmedA> {

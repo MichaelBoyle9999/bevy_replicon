@@ -15,7 +15,9 @@ use log::debug;
 
 use crate::{
     prelude::*,
-    server::confirmed_source::{ConfirmedLookup, ConfirmedLookupFn, RemovedAfterFn},
+    server::confirmed_source::{
+        ConfirmedAhead, ConfirmedAheadFn, ConfirmedLookup, ConfirmedLookupFn,
+    },
     shared::replication::rules::ReplicationRules,
 };
 
@@ -93,22 +95,22 @@ impl<'w> ReplicationQuery<'w, '_> {
         unsafe { lookup(self.world, entity, component_id, tick) }
     }
 
-    /// Asks a confirmed-value source whether `component` on `entity` is
-    /// recorded removed after `tick`, using this query's world access.
+    /// Asks a confirmed-value source what it records for `component` on
+    /// `entity` after `tick`, using this query's world access.
     ///
     /// # Safety
     ///
-    /// `removed_after` must obey the [`RemovedAfterFn`] contract — read-only
-    /// world access.
-    pub(super) unsafe fn removed_after(
+    /// `ahead` must obey the [`ConfirmedAheadFn`] contract — read-only world
+    /// access.
+    pub(super) unsafe fn confirmed_ahead(
         &self,
-        removed_after: RemovedAfterFn,
+        ahead: ConfirmedAheadFn,
         entity: Entity,
         component_id: ComponentId,
         tick: RepliconTick,
-    ) -> bool {
-        // SAFETY: caller upholds the `RemovedAfterFn` contract.
-        unsafe { removed_after(self.world, entity, component_id, tick) }
+    ) -> ConfirmedAhead {
+        // SAFETY: caller upholds the `ConfirmedAheadFn` contract.
+        unsafe { ahead(self.world, entity, component_id, tick) }
     }
 }
 
