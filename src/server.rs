@@ -15,6 +15,7 @@ use bevy::{
     ecs::{
         archetype::Archetypes,
         change_detection::{CheckChangeTicks, Tick},
+        component::ComponentId,
         entity::{Entities, EntityHash, EntityHashMap},
         intern::Interned,
         schedule::ScheduleLabel,
@@ -22,6 +23,7 @@ use bevy::{
     },
     platform::collections::{HashSet, hash_map::Entry},
     prelude::*,
+    ptr::Ptr,
     time::common_conditions::on_timer,
 };
 use bytes::Buf;
@@ -43,7 +45,7 @@ use crate::{
         message::server_message::message_buffer::MessageBuffer,
         replication::{
             client_ticks::{ClientTicks, EntityTicks},
-            registry::{ComponentIndex, ReplicationRegistry, component_mask::ComponentMask},
+            registry::{ReplicationRegistry, component_mask::ComponentMask},
             rules::ReplicationRules,
             track_mutate_messages::TrackMutateMessages,
         },
@@ -458,6 +460,7 @@ fn collect_despawns(
     mut serialized: ResMut<SerializedData>,
     mut pools: ResMut<ClientPools>,
     mut despawn_buffer: ResMut<DespawnBuffer>,
+    mut removal_buffer: ResMut<RemovalBuffer>,
     mut clients: Query<(
         Entity,
         &mut Updates,
@@ -467,6 +470,7 @@ fn collect_despawns(
     )>,
 ) -> Result<()> {
     for entity in despawn_buffer.drain(..) {
+        removal_buffer.discard(entity);
         let entity_range = entity.write(&mut serialized)?;
         for (client, mut message, mut ticks, mut priority, mut visibility) in &mut clients {
             if let Some(entity_ticks) = ticks.entities.remove(&entity) {
@@ -528,35 +532,42 @@ fn collect_removals(
 ) -> Result<()> {
     replicated_archetypes.update(archetypes, &rules);
 
-    for (entity, remove_ids) in removal_buffer.take_pending() {
+    let mut pending = removal_buffer.take_pending();
+    for (entity, remove_ids) in pending.drain() {
         let mut entity_range = None;
         for (_, mut message, _, _) in &mut clients {
             message.start_entity_removals();
         }
 
         let mut withheld = removal_buffer.take_vec();
-        for &(component_index, fns_id) in &remove_ids {
+        for &(component_index, rule) in &remove_ids {
+            let fns_id = rule.fns_id;
             let status = removal_status(
                 entities,
                 archetypes,
                 &query,
                 &confirmed_source,
-                &registry,
                 **server_tick,
                 entity,
-                component_index,
+                rule.id,
             );
             match status {
                 RemovalStatus::Withheld => {
                     trace!("withholding `{fns_id:?}` removal for `{entity}`: still confirmed");
-                    withheld.push((component_index, fns_id));
+                    withheld.push((component_index, rule));
                     continue;
                 }
                 RemovalStatus::Superseded => {
-                    trace!("skipping `{fns_id:?}` removal for `{entity}`: present again");
+                    trace!("skipping `{fns_id:?}` removal for `{entity}`: no longer removed");
                     continue;
                 }
-                RemovalStatus::Released => removal_buffer.mark_released(entity),
+                RemovalStatus::Released { removed_again } => {
+                    if removed_again {
+                        trace!("withholding `{fns_id:?}` removal for `{entity}`: removed again");
+                        withheld.push((component_index, rule));
+                    }
+                    removal_buffer.mark_released(entity);
+                }
             }
 
             let mut fns_id_range = None;
@@ -588,6 +599,7 @@ fn collect_removals(
             removal_buffer.withhold(entity, withheld);
         }
     }
+    removal_buffer.return_pending(pending);
 
     for (client, mut message, mut ticks, mut visibility) in &mut clients {
         for (entity, filter_mask) in visibility.drain_lost() {
@@ -656,11 +668,15 @@ fn collect_removals(
 enum RemovalStatus {
     /// The replicated state at [`ServerTick`] does not show the removal yet.
     Withheld,
-    /// The component is present again, so it was never removed from the
-    /// replicated state's perspective.
+    /// The removal never reaches the replicated state: the component is present
+    /// again, and the confirmed history records no removal ahead.
     Superseded,
     /// The replicated state at [`ServerTick`] no longer has the component.
-    Released,
+    Released {
+        /// The confirmed history records the component removed again later,
+        /// after a re-insertion.
+        removed_again: bool,
+    },
 }
 
 /// Decides whether a buffered removal reaches clients at `server_tick`.
@@ -671,42 +687,79 @@ enum RemovalStatus {
 /// change via [`collect_changes`]. With a [`ConfirmedReplicationSource`], the
 /// confirmed state decides instead of the live archetype, since the live
 /// component runs ahead of the tick being replicated.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "plain reads of the send systems' params"
-)]
 fn removal_status(
     entities: &Entities,
     archetypes: &Archetypes,
     query: &ReplicationQuery,
     confirmed_source: &ConfirmedReplicationSource,
-    registry: &ReplicationRegistry,
     server_tick: RepliconTick,
     entity: Entity,
-    component_index: ComponentIndex,
+    id: ComponentId,
 ) -> RemovalStatus {
-    let Some(&(id, _)) = registry.get_by_index(component_index) else {
-        return RemovalStatus::Released;
+    let present_live = || {
+        entities
+            .get_spawned(entity)
+            .ok()
+            .and_then(|location| archetypes.get(location.archetype_id))
+            .is_some_and(|archetype| archetype.contains(id))
     };
-    // SAFETY: the installed lookup obeys the `ConfirmedLookupFn` contract.
-    let confirmed = confirmed_source
-        .lookup()
-        .map(|lookup| unsafe { query.confirmed_lookup(lookup, entity, id, server_tick) });
-    match confirmed {
-        Some(ConfirmedLookup::Confirmed(_) | ConfirmedLookup::Unconfirmed) => {
-            RemovalStatus::Withheld
-        }
-        Some(ConfirmedLookup::Removed) => RemovalStatus::Released,
-        Some(ConfirmedLookup::Live) | None => {
-            if let Ok(location) = entities.get_spawned(entity)
-                && let Some(archetype) = archetypes.get(location.archetype_id)
-                && archetype.contains(id)
-            {
-                RemovalStatus::Superseded
-            } else {
-                RemovalStatus::Released
+    let live_status = || {
+        if present_live() {
+            RemovalStatus::Superseded
+        } else {
+            RemovalStatus::Released {
+                removed_again: false,
             }
         }
+    };
+    let Some(fns) = confirmed_source.fns() else {
+        return live_status();
+    };
+    // SAFETY: the installed lookups obey the `ConfirmedLookupFn` and
+    // `RemovedAfterFn` contracts.
+    let confirmed = unsafe { query.confirmed_lookup(fns.lookup, entity, id, server_tick) };
+    let removed_after =
+        || unsafe { query.removed_after(fns.removed_after, entity, id, server_tick) };
+    match confirmed {
+        ConfirmedLookup::Live => live_status(),
+        ConfirmedLookup::Removed => RemovalStatus::Released {
+            removed_again: removed_after(),
+        },
+        // A removal outside the simulation reaches the history only at the
+        // next tick, so one still absent live stays withheld until it does.
+        ConfirmedLookup::Confirmed(_) | ConfirmedLookup::Unconfirmed => {
+            if !removed_after() && present_live() {
+                RemovalStatus::Superseded
+            } else {
+                RemovalStatus::Withheld
+            }
+        }
+    }
+}
+
+/// The value of `component_id` on `entity` to replicate at `server_tick`.
+///
+/// With no confirmed source installed (the default) this is `live`. With a
+/// source, a confirmed (past-tick) value from history replaces it, and a
+/// component not confirmed at `server_tick` is withheld (never the live,
+/// unconfirmed present).
+fn replicated_value<'w>(
+    query: &ReplicationQuery<'w, '_>,
+    confirmed_source: &ConfirmedReplicationSource,
+    server_tick: RepliconTick,
+    entity: Entity,
+    component_id: ComponentId,
+    live: Option<Ptr<'w>>,
+) -> Option<Ptr<'w>> {
+    let Some(fns) = confirmed_source.fns() else {
+        return live;
+    };
+    // SAFETY: the installed lookup obeys the `ConfirmedLookupFn` contract; any
+    // returned `Ptr` is of the same type as `component_id`'s storage.
+    match unsafe { query.confirmed_lookup(fns.lookup, entity, component_id, server_tick) } {
+        ConfirmedLookup::Live => live,
+        ConfirmedLookup::Confirmed(ptr) => Some(ptr),
+        ConfirmedLookup::Unconfirmed | ConfirmedLookup::Removed => None,
     }
 }
 
@@ -748,37 +801,51 @@ fn collect_changes(
                 mutations.start_entity();
             }
 
-            for &(rule, storage) in &replicated_archetype.components {
-                let (component_index, component_id, fns) = registry.get(rule.fns_id);
-
-                // SAFETY: component and storage were obtained from this archetype.
-                let (live_ptr, ticks) = unsafe {
-                    query.get_component_unchecked(
-                        entity,
-                        archetype.table_id(),
-                        storage,
+            // A component removed live but still confirmed keeps replicating its
+            // confirmed value until its removal is released. Without live change
+            // ticks, it counts as changed every tick.
+            let live = replicated_archetype
+                .components
+                .iter()
+                .filter_map(|&(rule, storage)| {
+                    let (_, component_id, _) = registry.get(rule.fns_id);
+                    // SAFETY: component and storage were obtained from this archetype.
+                    let (live_ptr, ticks) = unsafe {
+                        query.get_component_unchecked(
+                            entity,
+                            archetype.table_id(),
+                            storage,
+                            component_id,
+                        )
+                    };
+                    let ptr = replicated_value(
+                        &query,
+                        &confirmed_source,
+                        **server_tick,
+                        entity.id(),
                         component_id,
-                    )
-                };
+                        Some(live_ptr),
+                    )?;
+                    Some((rule, ptr, Some(ticks)))
+                });
+            let removed_live = removal_buffer
+                .withheld_of(entity.id())
+                .iter()
+                .filter(|(_, rule)| !archetype.contains(rule.id))
+                .filter_map(|&(_, rule)| {
+                    let ptr = replicated_value(
+                        &query,
+                        &confirmed_source,
+                        **server_tick,
+                        entity.id(),
+                        rule.id,
+                        None,
+                    )?;
+                    Some((rule, ptr, None))
+                });
 
-                // Resolve the value to serialize. With no confirmed source installed
-                // (the default) this is the live component, unchanged. With a source, a
-                // confirmed (past-tick) value from history replaces it; a component not
-                // yet confirmed at `server_tick` is withheld this frame (never the live,
-                // unconfirmed present). Only the *value* is redirected — change detection
-                // (below) stays on the live component's ticks.
-                let ptr = match confirmed_source.lookup() {
-                    // SAFETY: the installed lookup obeys the `ConfirmedLookupFn` contract;
-                    // any returned `Ptr` is of the same type as `component_id`'s storage.
-                    Some(lookup) => match unsafe {
-                        query.confirmed_lookup(lookup, entity.id(), component_id, **server_tick)
-                    } {
-                        ConfirmedLookup::Live => live_ptr,
-                        ConfirmedLookup::Confirmed(ptr) => ptr,
-                        ConfirmedLookup::Unconfirmed | ConfirmedLookup::Removed => continue,
-                    },
-                    None => live_ptr,
-                };
+            for (rule, ptr, ticks) in live.chain(removed_live) {
+                let (component_index, component_id, fns) = registry.get(rule.fns_id);
 
                 // SAFETY: `fns` and `ptr` were created for the same component type.
                 let component = unsafe {
@@ -811,7 +878,9 @@ fn collect_changes(
                         let tick_diff = **server_tick - entity_ticks.server_tick;
                         if rule.mode != ReplicationMode::Once
                             && base_priority * tick_diff as f32 >= 1.0
-                            && ticks.is_changed(entity_ticks.system_tick, **change_tick)
+                            && ticks.is_none_or(|ticks| {
+                                ticks.is_changed(entity_ticks.system_tick, **change_tick)
+                            })
                         {
                             trace!(
                                 "writing `{:?}` mutation for `{}` for client `{client}`",

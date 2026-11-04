@@ -38,7 +38,8 @@ use crate::shared::replicon_tick::RepliconTick;
 /// confirmed one.
 ///
 /// A live removal is withheld until the lookup returns [`Self::Removed`], and
-/// sent at that `ServerTick`.
+/// sent at that `ServerTick`. One that [`RemovedAfterFn`] no longer reports
+/// ahead while the component is present live again is dropped.
 pub enum ConfirmedLookup<'w> {
     /// Not history-sourced — replicon serializes the live component, as usual.
     Live,
@@ -72,6 +73,29 @@ pub type ConfirmedLookupFn = for<'w> unsafe fn(
     RepliconTick,
 ) -> ConfirmedLookup<'w>;
 
+/// Whether the confirmed history of `component` on `entity` records a removal
+/// at a tick after `tick`, reading from the world through the cell.
+///
+/// Only asked for components the [`ConfirmedLookupFn`] reports as
+/// history-sourced. A withheld removal for which this returns `false` while
+/// the component is present live again can no longer reach clients, since the
+/// confirmed state never shows it, so it is dropped. While the component is
+/// still absent live, the history may not have recorded the removal yet, so it
+/// stays withheld.
+///
+/// # Safety
+///
+/// The implementation must only *read* through the cell.
+pub type RemovedAfterFn =
+    for<'w> unsafe fn(UnsafeWorldCell<'w>, Entity, ComponentId, RepliconTick) -> bool;
+
+/// The functions a [`ConfirmedReplicationSource`] reads confirmed history with.
+#[derive(Clone, Copy)]
+pub(crate) struct ConfirmedHistoryFns {
+    pub(crate) lookup: ConfirmedLookupFn,
+    pub(crate) removed_after: RemovedAfterFn,
+}
+
 /// Optional authority-side source of confirmed component values.
 ///
 /// Unset by default: replication serializes live components (the lead-0 /
@@ -79,21 +103,24 @@ pub type ConfirmedLookupFn = for<'w> unsafe fn(
 /// authority replicate `history[ServerTick]` while its live components run ahead
 /// at the predicted present.
 #[derive(Resource, Default)]
-pub struct ConfirmedReplicationSource(Option<ConfirmedLookupFn>);
+pub struct ConfirmedReplicationSource(Option<ConfirmedHistoryFns>);
 
 impl ConfirmedReplicationSource {
-    /// Install the lookup, replacing any previous one.
-    pub fn set(&mut self, lookup: ConfirmedLookupFn) {
-        self.0 = Some(lookup);
+    /// Install the lookups, replacing any previous ones.
+    pub fn set(&mut self, lookup: ConfirmedLookupFn, removed_after: RemovedAfterFn) {
+        self.0 = Some(ConfirmedHistoryFns {
+            lookup,
+            removed_after,
+        });
     }
 
-    /// Remove the lookup, reverting to live-component serialization.
+    /// Remove the lookups, reverting to live-component serialization.
     pub fn clear(&mut self) {
         self.0 = None;
     }
 
-    /// The installed lookup, if any.
-    pub(crate) fn lookup(&self) -> Option<ConfirmedLookupFn> {
+    /// The installed lookups, if any.
+    pub(crate) fn fns(&self) -> Option<ConfirmedHistoryFns> {
         self.0
     }
 }

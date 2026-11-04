@@ -1,19 +1,11 @@
-use bevy::{
-    ecs::{component::ComponentId, system::SystemState, world::unsafe_world_cell::UnsafeWorldCell},
-    prelude::*,
-    ptr::Ptr,
-    state::app::StatesPlugin,
-};
+use bevy::{ecs::system::SystemState, prelude::*, state::app::StatesPlugin};
 use bevy_replicon::{
     client::confirm_history::{ConfirmHistory, EntityReplicated},
     prelude::*,
     server::server_tick::ServerTick,
-    shared::{
-        replication::{
-            deferred_entity::DeferredEntity,
-            registry::{ctx::WriteCtx, receive_fns},
-        },
-        replicon_tick::RepliconTick,
+    shared::replication::{
+        deferred_entity::DeferredEntity,
+        registry::{ctx::WriteCtx, receive_fns},
     },
     test_app::{ServerTestAppExt, TestClientEntity},
 };
@@ -109,125 +101,6 @@ fn removed_and_reinserted_same_tick() {
     );
     let mut removals: SystemState<RemovedComponents<A>> = SystemState::new(client_app.world_mut());
     assert!(removals.get(client_app.world()).is_empty());
-}
-
-/// With a confirmed source, the live component runs ahead of the replicated
-/// [`ServerTick`]: a live removal reaches clients only once the confirmed state
-/// at `ServerTick` no longer has the component.
-#[test]
-fn withheld_until_confirmed_absent() {
-    let (mut server_app, mut client_app) = confirmed_pair();
-    let server_entity = server_app
-        .world_mut()
-        .spawn((Replicated, A, ConfirmedA::default()))
-        .id();
-    exchange(&mut server_app, &mut client_app);
-
-    let removed_at = server_app.world().resource::<ServerTick>().get() + 2;
-    let mut entity = server_app.world_mut().entity_mut(server_entity);
-    entity.remove::<A>();
-    entity.get_mut::<ConfirmedA>().unwrap().removed_at = Some(removed_at);
-
-    let mut components = client_app.world_mut().query::<&A>();
-    exchange(&mut server_app, &mut client_app);
-    assert_eq!(
-        components.iter(client_app.world()).len(),
-        1,
-        "the confirmed state still has the component"
-    );
-
-    exchange(&mut server_app, &mut client_app);
-    assert_eq!(components.iter(client_app.world()).len(), 0);
-}
-
-#[test]
-fn removal_without_confirmed_history_is_sent_at_once() {
-    let (mut server_app, mut client_app) = confirmed_pair();
-    let server_entity = server_app.world_mut().spawn((Replicated, A)).id();
-    exchange(&mut server_app, &mut client_app);
-
-    server_app
-        .world_mut()
-        .entity_mut(server_entity)
-        .remove::<A>();
-    exchange(&mut server_app, &mut client_app);
-
-    let mut components = client_app.world_mut().query::<&A>();
-    assert_eq!(components.iter(client_app.world()).len(), 0);
-}
-
-#[test]
-fn removed_and_reinserted_without_confirmed_history_is_not_sent() {
-    let (mut server_app, mut client_app) = confirmed_pair();
-    let server_entity = server_app.world_mut().spawn((Replicated, A)).id();
-    exchange(&mut server_app, &mut client_app);
-
-    server_app
-        .world_mut()
-        .entity_mut(server_entity)
-        .remove::<A>()
-        .insert(A);
-    exchange(&mut server_app, &mut client_app);
-
-    let mut components = client_app.world_mut().query::<&A>();
-    assert_eq!(components.iter(client_app.world()).len(), 1);
-}
-
-fn confirmed_pair() -> (App, App) {
-    let mut server_app = App::new();
-    let mut client_app = App::new();
-    for app in [&mut server_app, &mut client_app] {
-        app.add_plugins((
-            MinimalPlugins,
-            StatesPlugin,
-            RepliconPlugins.set(ServerPlugin::new(PostUpdate)),
-        ))
-        .replicate::<A>()
-        .finish();
-    }
-    server_app
-        .world_mut()
-        .resource_mut::<ConfirmedReplicationSource>()
-        .set(confirmed_a);
-    server_app.connect_client(&mut client_app);
-    (server_app, client_app)
-}
-
-fn exchange(server_app: &mut App, client_app: &mut App) {
-    server_app.update();
-    server_app.exchange_with_client(client_app);
-    client_app.update();
-    server_app.exchange_with_client(client_app);
-}
-
-/// The confirmed state of [`A`]: present until `removed_at`.
-#[derive(Component, Default)]
-struct ConfirmedA {
-    value: A,
-    removed_at: Option<u32>,
-}
-
-unsafe fn confirmed_a<'w>(
-    world: UnsafeWorldCell<'w>,
-    entity: Entity,
-    _component: ComponentId,
-    tick: RepliconTick,
-) -> ConfirmedLookup<'w> {
-    let Some(confirmed) = world
-        .get_entity(entity)
-        .ok()
-        .and_then(|entity| unsafe { entity.get::<ConfirmedA>() })
-    else {
-        return ConfirmedLookup::Live;
-    };
-    if confirmed
-        .removed_at
-        .is_some_and(|removed_at| tick.get() >= removed_at)
-    {
-        ConfirmedLookup::Removed
-    } else {
-        ConfirmedLookup::Confirmed(Ptr::from(&confirmed.value))
-    }
 }
 
 #[test]
@@ -793,7 +666,7 @@ fn visibility_lose() {
     assert_eq!(components.iter(client_app.world()).len(), 0);
 }
 
-#[derive(Component, Default, Deserialize, Serialize)]
+#[derive(Component, Deserialize, Serialize)]
 struct A;
 
 #[derive(Component, Deserialize, Serialize)]

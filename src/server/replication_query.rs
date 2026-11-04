@@ -15,7 +15,7 @@ use log::debug;
 
 use crate::{
     prelude::*,
-    server::confirmed_source::{ConfirmedLookup, ConfirmedLookupFn},
+    server::confirmed_source::{ConfirmedLookup, ConfirmedLookupFn, RemovedAfterFn},
     shared::replication::rules::ReplicationRules,
 };
 
@@ -91,6 +91,24 @@ impl<'w> ReplicationQuery<'w, '_> {
     ) -> ConfirmedLookup<'w> {
         // SAFETY: caller upholds the `ConfirmedLookupFn` contract.
         unsafe { lookup(self.world, entity, component_id, tick) }
+    }
+
+    /// Asks a confirmed-value source whether `component` on `entity` is
+    /// recorded removed after `tick`, using this query's world access.
+    ///
+    /// # Safety
+    ///
+    /// `removed_after` must obey the [`RemovedAfterFn`] contract — read-only
+    /// world access.
+    pub(super) unsafe fn removed_after(
+        &self,
+        removed_after: RemovedAfterFn,
+        entity: Entity,
+        component_id: ComponentId,
+        tick: RepliconTick,
+    ) -> bool {
+        // SAFETY: caller upholds the `RemovedAfterFn` contract.
+        unsafe { removed_after(self.world, entity, component_id, tick) }
     }
 }
 
