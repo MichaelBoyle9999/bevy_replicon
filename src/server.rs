@@ -43,7 +43,7 @@ use crate::{
         message::server_message::message_buffer::MessageBuffer,
         replication::{
             client_ticks::{ClientTicks, EntityTicks},
-            registry::{ReplicationRegistry, component_mask::ComponentMask},
+            registry::{ComponentIndex, ReplicationRegistry, component_mask::ComponentMask},
             rules::ReplicationRules,
             track_mutate_messages::TrackMutateMessages,
         },
@@ -501,13 +501,18 @@ fn collect_despawns(
     Ok(())
 }
 
-/// Collects component removals from this tick into update messages.
+/// Collects component removals into update messages.
 ///
-/// The removal buffer will be cleaned later in [`collect_changes`].
+/// A removal is sent once the replicated state at [`ServerTick`] no longer has
+/// the component: with a [`ConfirmedReplicationSource`], a removal the confirmed
+/// state does not show yet is withheld for later ticks.
 fn collect_removals(
     archetypes: &Archetypes,
     entities: &Entities,
-    removal_buffer: Res<RemovalBuffer>,
+    query: ReplicationQuery,
+    server_tick: Res<ServerTick>,
+    confirmed_source: Res<ConfirmedReplicationSource>,
+    mut removal_buffer: ResMut<RemovalBuffer>,
     rules: Res<ReplicationRules>,
     registry: Res<ReplicationRegistry>,
     filter_registry: Res<FilterRegistry>,
@@ -523,30 +528,37 @@ fn collect_removals(
 ) -> Result<()> {
     replicated_archetypes.update(archetypes, &rules);
 
-    for (&entity, remove_ids) in removal_buffer.iter() {
+    for (entity, remove_ids) in removal_buffer.take_pending() {
         let mut entity_range = None;
         for (_, mut message, _, _) in &mut clients {
             message.start_entity_removals();
         }
 
-        for &(component_index, fns_id) in remove_ids {
-            // A removal whose component is present again at send time is not a
-            // removal from the client's perspective: replication mirrors
-            // end-of-tick state, and a component removed and re-inserted within
-            // one tick (e.g. a rollback resimulation stripping a component
-            // ahead of its insert tick and replaying it back) reaches the
-            // client as an ordinary change via `collect_changes`. Sending the
-            // stale removal would follow (or race) that value and plant a
-            // terminal removal in the client's view of a still-present
-            // component.
-            if let Ok(location) = entities.get_spawned(entity)
-                && let Some(&(id, _)) = registry.get_by_index(component_index)
-                && let Some(archetype) = archetypes.get(location.archetype_id)
-                && archetype.contains(id)
-            {
-                trace!("skipping `{fns_id:?}` removal for `{entity}`: re-inserted this tick");
-                continue;
+        let mut withheld = removal_buffer.take_vec();
+        for &(component_index, fns_id) in &remove_ids {
+            let status = removal_status(
+                entities,
+                archetypes,
+                &query,
+                &confirmed_source,
+                &registry,
+                **server_tick,
+                entity,
+                component_index,
+            );
+            match status {
+                RemovalStatus::Withheld => {
+                    trace!("withholding `{fns_id:?}` removal for `{entity}`: still confirmed");
+                    withheld.push((component_index, fns_id));
+                    continue;
+                }
+                RemovalStatus::Superseded => {
+                    trace!("skipping `{fns_id:?}` removal for `{entity}`: present again");
+                    continue;
+                }
+                RemovalStatus::Released => removal_buffer.mark_released(entity),
             }
+
             let mut fns_id_range = None;
             for (client, mut message, mut ticks, _) in &mut clients {
                 // Only send removals for components that were previously sent.
@@ -568,6 +580,12 @@ fn collect_removals(
                 message.add_removal(fns_id_range);
                 entity_ticks.components.remove(component_index);
             }
+        }
+        removal_buffer.recycle(remove_ids);
+        if withheld.is_empty() {
+            removal_buffer.recycle(withheld);
+        } else {
+            removal_buffer.withhold(entity, withheld);
         }
     }
 
@@ -635,6 +653,63 @@ fn collect_removals(
     Ok(())
 }
 
+enum RemovalStatus {
+    /// The replicated state at [`ServerTick`] does not show the removal yet.
+    Withheld,
+    /// The component is present again, so it was never removed from the
+    /// replicated state's perspective.
+    Superseded,
+    /// The replicated state at [`ServerTick`] no longer has the component.
+    Released,
+}
+
+/// Decides whether a buffered removal reaches clients at `server_tick`.
+///
+/// Replication mirrors end-of-tick state: a component removed and re-inserted
+/// within one tick (e.g. a rollback resimulation stripping a component ahead of
+/// its insert tick and replaying it back) reaches the client as an ordinary
+/// change via [`collect_changes`]. With a [`ConfirmedReplicationSource`], the
+/// confirmed state decides instead of the live archetype, since the live
+/// component runs ahead of the tick being replicated.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "plain reads of the send systems' params"
+)]
+fn removal_status(
+    entities: &Entities,
+    archetypes: &Archetypes,
+    query: &ReplicationQuery,
+    confirmed_source: &ConfirmedReplicationSource,
+    registry: &ReplicationRegistry,
+    server_tick: RepliconTick,
+    entity: Entity,
+    component_index: ComponentIndex,
+) -> RemovalStatus {
+    let Some(&(id, _)) = registry.get_by_index(component_index) else {
+        return RemovalStatus::Released;
+    };
+    // SAFETY: the installed lookup obeys the `ConfirmedLookupFn` contract.
+    let confirmed = confirmed_source
+        .lookup()
+        .map(|lookup| unsafe { query.confirmed_lookup(lookup, entity, id, server_tick) });
+    match confirmed {
+        Some(ConfirmedLookup::Confirmed(_) | ConfirmedLookup::Unconfirmed) => {
+            RemovalStatus::Withheld
+        }
+        Some(ConfirmedLookup::Removed) => RemovalStatus::Released,
+        Some(ConfirmedLookup::Live) | None => {
+            if let Ok(location) = entities.get_spawned(entity)
+                && let Some(archetype) = archetypes.get(location.archetype_id)
+                && archetype.contains(id)
+            {
+                RemovalStatus::Superseded
+            } else {
+                RemovalStatus::Released
+            }
+        }
+    }
+}
+
 /// Collects component changes from this tick into update and mutate messages since the last entity tick.
 fn collect_changes(
     archetypes: &Archetypes,
@@ -700,7 +775,7 @@ fn collect_changes(
                     } {
                         ConfirmedLookup::Live => live_ptr,
                         ConfirmedLookup::Confirmed(ptr) => ptr,
-                        ConfirmedLookup::Unconfirmed => continue,
+                        ConfirmedLookup::Unconfirmed | ConfirmedLookup::Removed => continue,
                     },
                     None => live_ptr,
                 };
@@ -789,7 +864,7 @@ fn collect_changes(
                 let new_for_client = matches!(entity_ticks, Entry::Vacant(_));
                 if new_for_client
                     || updates.changed_entity_added()
-                    || removal_buffer.contains_key(&entity.id())
+                    || removal_buffer.is_released(entity.id())
                 {
                     // If there is any insertion, removal, or it's a new entity for a client, include all mutations
                     // into update message and bump the last acknowledged tick to keep entity updates atomic.
@@ -914,8 +989,10 @@ fn reset(
     mut related_entities: ResMut<RelatedEntities>,
     clients: Query<Entity, With<ConnectedClient>>,
     mut message_buffer: ResMut<MessageBuffer>,
+    mut removal_buffer: ResMut<RemovalBuffer>,
 ) {
     messages.clear();
+    removal_buffer.reset();
     *server_tick = Default::default();
     message_buffer.clear();
     related_entities.clear();

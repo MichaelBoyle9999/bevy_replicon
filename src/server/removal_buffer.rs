@@ -1,5 +1,10 @@
+use core::mem;
+
 use bevy::{
-    ecs::{component::ComponentId, entity::hash_map::EntityHashMap},
+    ecs::{
+        component::ComponentId,
+        entity::{hash_map::EntityHashMap, hash_set::EntityHashSet},
+    },
     prelude::*,
 };
 use log::trace;
@@ -9,12 +14,20 @@ use crate::{
     shared::replication::registry::{ComponentIndex, FnsId, ReplicationRegistry},
 };
 
-/// Buffer with removed components for the current tick.
+/// Buffer with removed components for the current tick, and with removals
+/// withheld from earlier ticks until the confirmed state shows them.
 #[derive(Resource, Deref, Default)]
 pub(super) struct RemovalBuffer {
-    /// Component removals grouped by entity.
+    /// Component removals of the current tick grouped by entity.
     #[deref]
     removals: EntityHashMap<Vec<(ComponentIndex, FnsId)>>,
+
+    /// Removals from earlier ticks that the confirmed state at the last
+    /// [`ServerTick`](super::server_tick::ServerTick) did not show yet.
+    withheld: EntityHashMap<Vec<(ComponentIndex, FnsId)>>,
+
+    /// Entities with removals released for sending this tick.
+    released: EntityHashSet,
 
     /// [`Vec`]s from removals.
     ///
@@ -48,12 +61,69 @@ impl RemovalBuffer {
         }
     }
 
-    /// Clears all removals.
+    /// Takes the removals of the current tick together with those withheld
+    /// from earlier ticks, each removal once.
+    pub(super) fn take_pending(&mut self) -> EntityHashMap<Vec<(ComponentIndex, FnsId)>> {
+        for (entity, mut components) in self.removals.drain() {
+            match self.withheld.get_mut(&entity) {
+                Some(withheld) => {
+                    for &removal in &components {
+                        if !withheld.contains(&removal) {
+                            withheld.push(removal);
+                        }
+                    }
+                    components.clear();
+                    self.pool.push(components);
+                }
+                None => {
+                    self.withheld.insert(entity, components);
+                }
+            }
+        }
+        mem::take(&mut self.withheld)
+    }
+
+    /// Keeps `components` for the next tick's [`Self::take_pending`].
+    pub(super) fn withhold(&mut self, entity: Entity, components: Vec<(ComponentIndex, FnsId)>) {
+        self.withheld.insert(entity, components);
+    }
+
+    /// Returns an emptied [`Vec`] for reuse.
+    pub(super) fn recycle(&mut self, mut components: Vec<(ComponentIndex, FnsId)>) {
+        components.clear();
+        self.pool.push(components);
+    }
+
+    /// Returns an empty [`Vec`] for removals, reusing allocated capacity.
+    pub(super) fn take_vec(&mut self) -> Vec<(ComponentIndex, FnsId)> {
+        self.pool.pop().unwrap_or_default()
+    }
+
+    pub(super) fn mark_released(&mut self, entity: Entity) {
+        self.released.insert(entity);
+    }
+
+    pub(super) fn is_released(&self, entity: Entity) -> bool {
+        self.released.contains(&entity)
+    }
+
+    /// Clears the current tick's removals; withheld ones stay.
     ///
     /// Keeps the allocated memory for reuse.
     pub(super) fn clear(&mut self) {
         self.pool
             .extend(self.removals.drain().map(|(_, mut components)| {
+                components.clear();
+                components
+            }));
+        self.released.clear();
+    }
+
+    /// Clears all removals, withheld ones included.
+    pub(super) fn reset(&mut self) {
+        self.clear();
+        self.pool
+            .extend(self.withheld.drain().map(|(_, mut components)| {
                 components.clear();
                 components
             }));

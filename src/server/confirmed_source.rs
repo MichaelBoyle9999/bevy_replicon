@@ -29,12 +29,16 @@ use crate::shared::replicon_tick::RepliconTick;
 /// Outcome of consulting a [`ConfirmedReplicationSource`] for one component on
 /// one entity at the current `ServerTick`.
 ///
-/// Only the serialized *value* is redirected. Change detection — whether to send
-/// at all this tick — stays on the live component's change ticks (replicon's
-/// existing `is_changed`), which is what receivers' rollback/resim relies on: a
-/// dynamic body's authoritative components are rewritten every simulation step,
-/// so they replicate every tick regardless of whether the *value* changed. The
-/// value that goes on the wire, though, is the confirmed one.
+/// For a present component only the serialized *value* is redirected. Change
+/// detection — whether to send at all this tick — stays on the live component's
+/// change ticks (replicon's existing `is_changed`), which is what receivers'
+/// rollback/resim relies on: a dynamic body's authoritative components are
+/// rewritten every simulation step, so they replicate every tick regardless of
+/// whether the *value* changed. The value that goes on the wire, though, is the
+/// confirmed one.
+///
+/// A live removal is withheld until the lookup returns [`Self::Removed`], and
+/// sent at that `ServerTick`.
 pub enum ConfirmedLookup<'w> {
     /// Not history-sourced — replicon serializes the live component, as usual.
     Live,
@@ -46,6 +50,10 @@ pub enum ConfirmedLookup<'w> {
     /// entity/component did not exist at `ServerTick`. The component is withheld
     /// this frame; the live (unconfirmed present) value is never leaked.
     Unconfirmed,
+    /// History-sourced, and the component was removed at or before `ServerTick`.
+    /// A present component is withheld like [`Self::Unconfirmed`]; a live removal
+    /// is sent.
+    Removed,
 }
 
 /// Decides the confirmed value for `(entity, component)` at `tick`, reading from
@@ -57,8 +65,12 @@ pub enum ConfirmedLookup<'w> {
 /// no aliasing mutable access). Any [`Ptr`] returned in
 /// [`ConfirmedLookup::Confirmed`] must point to a live value of the same type as
 /// `component`'s storage, valid for the cell's lifetime.
-pub type ConfirmedLookupFn =
-    for<'w> unsafe fn(UnsafeWorldCell<'w>, Entity, ComponentId, RepliconTick) -> ConfirmedLookup<'w>;
+pub type ConfirmedLookupFn = for<'w> unsafe fn(
+    UnsafeWorldCell<'w>,
+    Entity,
+    ComponentId,
+    RepliconTick,
+) -> ConfirmedLookup<'w>;
 
 /// Optional authority-side source of confirmed component values.
 ///
