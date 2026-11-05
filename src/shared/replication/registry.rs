@@ -26,6 +26,13 @@ pub struct ReplicationRegistry {
     /// Useful if you need to intercept despawns and handle them in a special way.
     pub despawn: DespawnFn,
 
+    /// Server function reading the tick to attach to an entity's despawn, while the
+    /// entity still holds its components.
+    ///
+    /// By default uses [`no_despawn_tick`].
+    /// The client receives the tick as [`DespawnCtx::despawn_tick`].
+    pub despawn_tick: DespawnTickFn,
+
     /// Functions for replicated components.
     ///
     /// Unique for each component.
@@ -171,6 +178,7 @@ impl Default for ReplicationRegistry {
     fn default() -> Self {
         Self {
             despawn,
+            despawn_tick: no_despawn_tick,
             components: Default::default(),
             rules: Default::default(),
             marker_slots: 0,
@@ -195,6 +203,14 @@ pub type DespawnFn = fn(&DespawnCtx, EntityWorldMut);
 /// Default entity despawn function.
 pub fn despawn(_ctx: &DespawnCtx, entity: EntityWorldMut) {
     entity.despawn();
+}
+
+/// Signature of the despawn tick function in [`ReplicationRegistry::despawn_tick`].
+pub type DespawnTickFn = fn(EntityRef) -> Option<RepliconTick>;
+
+/// Default despawn tick function, attaching no tick.
+pub fn no_despawn_tick(_entity: EntityRef) -> Option<RepliconTick> {
+    None
 }
 
 #[cfg(test)]

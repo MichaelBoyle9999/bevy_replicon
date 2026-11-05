@@ -3,6 +3,7 @@ use bevy_replicon::{
     prelude::*,
     shared::{
         replication::registry::{ReplicationRegistry, ctx::DespawnCtx},
+        replicon_tick::RepliconTick,
         server_entity_map::ServerEntityMap,
     },
     test_app::{ServerTestAppExt, TestClientEntity},
@@ -50,6 +51,85 @@ fn single() {
     let entity_map = client_app.world().resource::<ServerEntityMap>();
     assert!(entity_map.to_client().is_empty());
     assert!(entity_map.to_server().is_empty());
+}
+
+fn despawn_tick_app() -> App {
+    let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins,
+        StatesPlugin,
+        RepliconPlugins.set(ServerPlugin::new(PostUpdate)),
+    ))
+    .add_visibility_filter::<EntityVisibility>();
+    app.world_mut()
+        .register_disabling_component::<CustomDisabled>();
+    let mut registry = app.world_mut().resource_mut::<ReplicationRegistry>();
+    registry.despawn_tick = despawn_tick_of;
+    registry.despawn = record_despawn_tick;
+    app.finish();
+    app
+}
+
+fn despawn_tick_pair(spawned: impl Bundle) -> (App, App, Entity) {
+    let mut server_app = despawn_tick_app();
+    let mut client_app = despawn_tick_app();
+    server_app.connect_client(&mut client_app);
+    let client = **client_app.world().resource::<TestClientEntity>();
+    server_app
+        .world_mut()
+        .entity_mut(client)
+        .insert(EntityVisibility);
+    let server_entity = server_app
+        .world_mut()
+        .spawn((Replicated, EntityVisibility, TickOnDespawn(7), spawned))
+        .id();
+
+    server_app.update();
+    server_app.exchange_with_client(&mut client_app);
+    client_app.update();
+    server_app.exchange_with_client(&mut client_app);
+
+    (server_app, client_app, server_entity)
+}
+
+fn received_despawn_ticks(client_app: &mut App) -> Vec<Option<RepliconTick>> {
+    client_app
+        .world_mut()
+        .query::<&DespawnedAt>()
+        .iter(client_app.world())
+        .map(|despawned| despawned.0)
+        .collect()
+}
+
+#[test]
+fn despawn_tick() {
+    let (mut server_app, mut client_app, server_entity) = despawn_tick_pair(CustomDisabled);
+
+    server_app.world_mut().despawn(server_entity);
+    server_app.update();
+    server_app.exchange_with_client(&mut client_app);
+    client_app.update();
+
+    assert_eq!(
+        received_despawn_ticks(&mut client_app),
+        [Some(RepliconTick::new(7))]
+    );
+}
+
+#[test]
+fn despawn_tick_on_visibility_lose() {
+    let (mut server_app, mut client_app, _) = despawn_tick_pair(());
+
+    let client = **client_app.world().resource::<TestClientEntity>();
+    server_app
+        .world_mut()
+        .entity_mut(client)
+        .remove::<EntityVisibility>();
+    server_app.update();
+    server_app.exchange_with_client(&mut client_app);
+    client_app.update();
+
+    assert_eq!(received_despawn_ticks(&mut client_app), [None]);
 }
 
 #[test]
@@ -516,6 +596,25 @@ struct Despawned;
 
 fn mark_despawned(_ctx: &DespawnCtx, mut entity: EntityWorldMut) {
     entity.insert(Despawned);
+}
+
+#[derive(Component)]
+struct TickOnDespawn(u32);
+
+#[derive(Component)]
+struct CustomDisabled;
+
+#[derive(Component)]
+struct DespawnedAt(Option<RepliconTick>);
+
+fn despawn_tick_of(entity: EntityRef) -> Option<RepliconTick> {
+    entity
+        .get::<TickOnDespawn>()
+        .map(|tick| RepliconTick::new(tick.0))
+}
+
+fn record_despawn_tick(ctx: &DespawnCtx, mut entity: EntityWorldMut) {
+    entity.insert(DespawnedAt(ctx.despawn_tick));
 }
 
 #[derive(Component)]

@@ -68,6 +68,12 @@ pub struct RemoveCtx {
 pub struct DespawnCtx {
     /// Tick for the currently processing message.
     pub message_tick: RepliconTick,
+
+    /// Tick the server attached to this despawn with
+    /// [`ReplicationRegistry::despawn_tick`](super::ReplicationRegistry::despawn_tick).
+    ///
+    /// Always [`None`] for an entity despawned because it lost visibility.
+    pub despawn_tick: Option<RepliconTick>,
 }
 
 /// A wrapper around [`World`] for spawning empty entities.

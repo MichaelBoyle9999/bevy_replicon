@@ -103,6 +103,24 @@ impl MessageWrite for EntityMapping {
     }
 }
 
+pub(crate) struct EntityDespawn {
+    pub(crate) entity: Entity,
+    pub(crate) tick: Option<RepliconTick>,
+}
+
+impl MessageWrite for EntityDespawn {
+    fn write(&self, serialized: &mut SerializedData) -> Result<Range<usize>> {
+        let start = serialized.len();
+
+        self.entity.write(serialized)?;
+        postcard_utils::to_extend_mut(&self.tick, &mut serialized.0)?;
+
+        let end = serialized.len();
+
+        Ok(start..end)
+    }
+}
+
 impl MessageWrite for Entity {
     fn write(&self, serialized: &mut SerializedData) -> Result<Range<usize>> {
         let start = serialized.len();

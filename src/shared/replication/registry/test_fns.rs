@@ -196,7 +196,10 @@ impl TestFnsEntityExt for EntityWorldMut<'_> {
 
     fn apply_despawn(self, message_tick: RepliconTick) {
         let registry = self.world().resource::<ReplicationRegistry>();
-        let ctx = DespawnCtx { message_tick };
+        let ctx = DespawnCtx {
+            message_tick,
+            despawn_tick: None,
+        };
         (registry.despawn)(&ctx, self);
     }
 }

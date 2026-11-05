@@ -20,6 +20,7 @@ use bevy::{
         intern::Interned,
         schedule::ScheduleLabel,
         system::SystemChangeTick,
+        world::DeferredWorld,
     },
     platform::collections::{HashSet, hash_map::Entry},
     prelude::*,
@@ -36,7 +37,7 @@ use crate::{
         replicated_archetypes::ReplicatedArchetypes,
         replication_messages::{
             mutations::MutationsSplit,
-            serialized_data::{EntityMapping, MessageWrite, WritableComponent},
+            serialized_data::{EntityDespawn, EntityMapping, MessageWrite, WritableComponent},
         },
         visibility::registry::FilterRegistry,
     },
@@ -324,14 +325,17 @@ fn buffer_removals(
     removals.insert(remove.entity, components, archetype, &registry);
 }
 
-fn buffer_despawn(
-    remove: On<Remove, Replicated>,
-    mut despawn_buffer: ResMut<DespawnBuffer>,
-    state: Res<State<ServerState>>,
-) {
-    if *state == ServerState::Running {
+fn buffer_despawn(remove: On<Remove, Replicated>, mut world: DeferredWorld) {
+    if *world.resource::<State<ServerState>>() == ServerState::Running {
         trace!("buffering despawn of `{}`", remove.entity);
-        despawn_buffer.push(remove.entity);
+        let despawn_tick = world
+            .get_resource::<ReplicationRegistry>()
+            .expect("registry should always exist on the server")
+            .despawn_tick;
+        let tick = despawn_tick(world.entity(remove.entity));
+        world
+            .resource_mut::<DespawnBuffer>()
+            .push((remove.entity, tick));
     }
 }
 
@@ -446,7 +450,11 @@ fn should_send_mapping(
 ) -> bool {
     // Since despawns processed later, we need to explicitly check for them here
     // because we can't distinguish between a despawn and removal of a visibility filter.
-    if visibility.get(entity).is_hidden(registry) || despawn_buffer.contains(&entity) {
+    if visibility.get(entity).is_hidden(registry)
+        || despawn_buffer
+            .iter()
+            .any(|&(despawned, _)| despawned == entity)
+    {
         return false;
     }
 
@@ -469,9 +477,9 @@ fn collect_despawns(
         &mut ClientVisibility,
     )>,
 ) -> Result<()> {
-    for entity in despawn_buffer.drain(..) {
+    for (entity, tick) in despawn_buffer.drain(..) {
         removal_buffer.discard(entity);
-        let entity_range = entity.write(&mut serialized)?;
+        let entity_range = EntityDespawn { entity, tick }.write(&mut serialized)?;
         for (client, mut message, mut ticks, mut priority, mut visibility) in &mut clients {
             if let Some(entity_ticks) = ticks.entities.remove(&entity) {
                 // Write despawn only if the entity was previously sent because
@@ -494,7 +502,7 @@ fn collect_despawns(
 
             if let Some(entity_ticks) = ticks.entities.remove(&entity) {
                 trace!("writing visibility lost for `{entity}` for client `{client}`");
-                let entity_range = entity.write(&mut serialized)?;
+                let entity_range = EntityDespawn { entity, tick: None }.write(&mut serialized)?;
                 message.add_despawn(entity_range);
                 pools.recycle_components(entity_ticks.components);
             }
@@ -1121,7 +1129,7 @@ struct ServerChangeTick(Tick);
 /// to avoid missing events in case the server's tick policy is
 /// not [`TickPolicy::EveryFrame`].
 #[derive(Resource, Deref, DerefMut, Default)]
-struct DespawnBuffer(Vec<Entity>);
+struct DespawnBuffer(Vec<(Entity, Option<RepliconTick>)>);
 
 /// Marker that enables replication and all events for a client.
 ///

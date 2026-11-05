@@ -441,6 +441,7 @@ fn apply_despawn(
     // with the last replication message, but the server might not yet have received confirmation
     // from the client and could include the deletion in the this message.
     let server_entity = postcard_utils::entity_from_buf(message)?;
+    let despawn_tick = postcard_utils::from_buf(message)?;
     if let Some(client_entity) = params.entity_map.server_entry(server_entity).remove() {
         // Requires manual removal since the map is removed from the world and inaccessible to triggers.
         // The entity can also be despawned via a relationship when applying
@@ -450,7 +451,10 @@ fn apply_despawn(
         params.despawned.insert(server_entity, client_entity);
         if let Ok(client_entity) = world.get_entity_mut(client_entity) {
             trace!("applying despawn for `{}`", client_entity.id());
-            let ctx = DespawnCtx { message_tick };
+            let ctx = DespawnCtx {
+                message_tick,
+                despawn_tick,
+            };
             (params.registry.despawn)(&ctx, client_entity);
         }
     }
