@@ -14,7 +14,7 @@ use core::{mem, time::Duration};
 use bevy::{
     ecs::{
         archetype::Archetypes,
-        change_detection::{CheckChangeTicks, Tick},
+        change_detection::{CheckChangeTicks, ComponentTicks, Tick},
         component::ComponentId,
         entity::{Entities, EntityHash, EntityHashMap},
         intern::Interned,
@@ -53,7 +53,7 @@ use crate::{
     },
 };
 use client_pools::ClientPools;
-use confirmed_source::{ConfirmedLookup, ConfirmedReplicationSource};
+use confirmed_source::{ConfirmedChangedFn, ConfirmedLookup, ConfirmedReplicationSource};
 use related_entities::RelatedEntities;
 use removal_buffer::RemovalBuffer;
 use replication_messages::{
@@ -748,7 +748,18 @@ fn removal_status(
     }
 }
 
-/// The value of `component_id` on `entity` to replicate at `server_tick`.
+/// How [`collect_changes`] tells whether a replicated value changed since the
+/// last tick a client acknowledged for its entity.
+#[derive(Clone, Copy)]
+enum ChangeDetection {
+    /// By the live component's change ticks.
+    Live(ComponentTicks),
+    /// By the confirmed history the value comes from.
+    Confirmed(ConfirmedChangedFn),
+}
+
+/// The value of `component_id` on `entity` to replicate at `server_tick`, and
+/// how to tell whether it changed for a client.
 ///
 /// With no confirmed source installed (the default) this is `live`. With a
 /// source, a confirmed (past-tick) value from history replaces it, and a
@@ -760,8 +771,9 @@ fn replicated_value<'w>(
     server_tick: RepliconTick,
     entity: Entity,
     component_id: ComponentId,
-    live: Option<Ptr<'w>>,
-) -> Option<Ptr<'w>> {
+    live: Option<(Ptr<'w>, ComponentTicks)>,
+) -> Option<(Ptr<'w>, ChangeDetection)> {
+    let live = live.map(|(ptr, ticks)| (ptr, ChangeDetection::Live(ticks)));
     let Some(fns) = confirmed_source.fns() else {
         return live;
     };
@@ -769,7 +781,7 @@ fn replicated_value<'w>(
     // returned `Ptr` is of the same type as `component_id`'s storage.
     match unsafe { query.confirmed_lookup(fns.lookup, entity, component_id, server_tick) } {
         ConfirmedLookup::Live => live,
-        ConfirmedLookup::Confirmed(ptr) => Some(ptr),
+        ConfirmedLookup::Confirmed(ptr) => Some((ptr, ChangeDetection::Confirmed(fns.changed))),
         ConfirmedLookup::Unconfirmed | ConfirmedLookup::Removed => None,
     }
 }
@@ -813,15 +825,14 @@ fn collect_changes(
             }
 
             // A component removed live but still confirmed keeps replicating its
-            // confirmed value until its removal is released. Without live change
-            // ticks, it counts as changed every tick.
+            // confirmed value until its removal is released.
             let live = replicated_archetype
                 .components
                 .iter()
                 .filter_map(|&(rule, storage)| {
                     let (_, component_id, _) = registry.get(rule.fns_id);
                     // SAFETY: component and storage were obtained from this archetype.
-                    let (live_ptr, ticks) = unsafe {
+                    let live = unsafe {
                         query.get_component_unchecked(
                             entity,
                             archetype.table_id(),
@@ -829,22 +840,22 @@ fn collect_changes(
                             component_id,
                         )
                     };
-                    let ptr = replicated_value(
+                    let (ptr, detection) = replicated_value(
                         &query,
                         &confirmed_source,
                         **server_tick,
                         entity.id(),
                         component_id,
-                        Some(live_ptr),
+                        Some(live),
                     )?;
-                    Some((rule, ptr, Some(ticks)))
+                    Some((rule, ptr, detection))
                 });
             let removed_live = removal_buffer
                 .withheld_of(entity.id())
                 .iter()
                 .filter(|(_, rule)| !archetype.contains(rule.id))
                 .filter_map(|&(_, rule)| {
-                    let ptr = replicated_value(
+                    let (ptr, detection) = replicated_value(
                         &query,
                         &confirmed_source,
                         **server_tick,
@@ -852,10 +863,10 @@ fn collect_changes(
                         rule.id,
                         None,
                     )?;
-                    Some((rule, ptr, None))
+                    Some((rule, ptr, detection))
                 });
 
-            for (rule, ptr, ticks) in live.chain(removed_live) {
+            for (rule, ptr, detection) in live.chain(removed_live) {
                 let (component_index, component_id, fns) = registry.get(rule.fns_id);
 
                 // SAFETY: `fns` and `ptr` were created for the same component type.
@@ -889,9 +900,22 @@ fn collect_changes(
                         let tick_diff = **server_tick - entity_ticks.server_tick;
                         if rule.mode != ReplicationMode::Once
                             && base_priority * tick_diff as f32 >= 1.0
-                            && ticks.is_none_or(|ticks| {
-                                ticks.is_changed(entity_ticks.system_tick, **change_tick)
-                            })
+                            && match detection {
+                                ChangeDetection::Live(ticks) => {
+                                    ticks.is_changed(entity_ticks.system_tick, **change_tick)
+                                }
+                                // SAFETY: the installed hook obeys the
+                                // `ConfirmedChangedFn` contract.
+                                ChangeDetection::Confirmed(changed) => unsafe {
+                                    query.confirmed_changed(
+                                        changed,
+                                        entity.id(),
+                                        component_id,
+                                        entity_ticks.server_tick,
+                                        **server_tick,
+                                    )
+                                },
+                            }
                         {
                             trace!(
                                 "writing `{:?}` mutation for `{}` for client `{client}`",

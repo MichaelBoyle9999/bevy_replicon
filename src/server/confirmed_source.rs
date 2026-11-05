@@ -29,13 +29,11 @@ use crate::shared::replicon_tick::RepliconTick;
 /// Outcome of consulting a [`ConfirmedReplicationSource`] for one component on
 /// one entity at the current `ServerTick`.
 ///
-/// For a present component only the serialized *value* is redirected. Change
-/// detection — whether to send at all this tick — stays on the live component's
-/// change ticks (replicon's existing `is_changed`), which is what receivers'
-/// rollback/resim relies on: a dynamic body's authoritative components are
-/// rewritten every simulation step, so they replicate every tick regardless of
-/// whether the *value* changed. The value that goes on the wire, though, is the
-/// confirmed one.
+/// For a [`Self::Confirmed`] component, change detection — whether to send it
+/// to a client at all this tick — reads the confirmed history too, through
+/// [`ConfirmedChangedFn`], instead of the live component's change ticks: the
+/// live component runs ahead, so it changes at ticks the client has yet to
+/// reach and stops changing while confirmed changes are still unsent.
 ///
 /// A live removal is withheld until the lookup returns [`Self::Removed`], and
 /// sent at that `ServerTick`. One that [`ConfirmedAheadFn`] no longer reports
@@ -99,11 +97,31 @@ pub struct ConfirmedAhead {
 pub type ConfirmedAheadFn =
     for<'w> unsafe fn(UnsafeWorldCell<'w>, Entity, ComponentId, RepliconTick) -> ConfirmedAhead;
 
+/// Whether the confirmed history of `component` on `entity` records a change,
+/// a new value or a removal, at a tick after `after`, up to and including
+/// `until`, reading from the world through the cell.
+///
+/// Only asked for components the [`ConfirmedLookupFn`] reports as
+/// [`ConfirmedLookup::Confirmed`] at `until`, with `after` the last tick a
+/// client acknowledged for the entity. A history that no longer reaches back
+/// to `after` must report a change, since the client's value can no longer be
+/// compared. A change is never looked for at or before `after`, so the history
+/// up to a client's acknowledged tick must be final: rewriting it, such as by
+/// resimulating from before [`ServerTick`](super::server_tick::ServerTick),
+/// leaves that client with the old value.
+///
+/// # Safety
+///
+/// The implementation must only *read* through the cell.
+pub type ConfirmedChangedFn =
+    for<'w> unsafe fn(UnsafeWorldCell<'w>, Entity, ComponentId, RepliconTick, RepliconTick) -> bool;
+
 /// The functions a [`ConfirmedReplicationSource`] reads confirmed history with.
 #[derive(Clone, Copy)]
 pub(crate) struct ConfirmedHistoryFns {
     pub(crate) lookup: ConfirmedLookupFn,
     pub(crate) ahead: ConfirmedAheadFn,
+    pub(crate) changed: ConfirmedChangedFn,
 }
 
 /// Optional authority-side source of confirmed component values.
@@ -117,8 +135,17 @@ pub struct ConfirmedReplicationSource(Option<ConfirmedHistoryFns>);
 
 impl ConfirmedReplicationSource {
     /// Install the lookups, replacing any previous ones.
-    pub fn set(&mut self, lookup: ConfirmedLookupFn, ahead: ConfirmedAheadFn) {
-        self.0 = Some(ConfirmedHistoryFns { lookup, ahead });
+    pub fn set(
+        &mut self,
+        lookup: ConfirmedLookupFn,
+        ahead: ConfirmedAheadFn,
+        changed: ConfirmedChangedFn,
+    ) {
+        self.0 = Some(ConfirmedHistoryFns {
+            lookup,
+            ahead,
+            changed,
+        });
     }
 
     /// Remove the lookups, reverting to live-component serialization.

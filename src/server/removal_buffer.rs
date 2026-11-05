@@ -503,7 +503,7 @@ mod tests {
         .finish();
         app.world_mut()
             .resource_mut::<ConfirmedReplicationSource>()
-            .set(confirmed_a, confirmed_a_ahead);
+            .set(confirmed_a, confirmed_a_ahead, confirmed_a_changed);
         app.world_mut()
             .resource_mut::<NextState<ServerState>>()
             .set(ServerState::Running);
@@ -565,6 +565,16 @@ mod tests {
     ) -> ConfirmedAhead {
         confirmed_of(world, entity)
             .map_or_else(ConfirmedAhead::default, |confirmed| confirmed.ahead)
+    }
+
+    unsafe fn confirmed_a_changed(
+        _world: UnsafeWorldCell<'_>,
+        _entity: Entity,
+        _component: ComponentId,
+        _after: RepliconTick,
+        _until: RepliconTick,
+    ) -> bool {
+        true
     }
 
     fn confirmed_of(world: UnsafeWorldCell<'_>, entity: Entity) -> Option<&ConfirmedA> {

@@ -741,8 +741,8 @@ pub mod prelude {
     pub use super::server::{
         AuthorizedClient, PriorityMap, ServerPlugin, ServerSystems,
         confirmed_source::{
-            ConfirmedAhead, ConfirmedAheadFn, ConfirmedLookup, ConfirmedLookupFn,
-            ConfirmedReplicationSource,
+            ConfirmedAhead, ConfirmedAheadFn, ConfirmedChangedFn, ConfirmedLookup,
+            ConfirmedLookupFn, ConfirmedReplicationSource,
         },
         message::ServerMessagePlugin,
         related_entities::SyncRelatedAppExt,

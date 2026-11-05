@@ -1,5 +1,7 @@
 use bevy::{
-    ecs::{component::ComponentId, world::unsafe_world_cell::UnsafeWorldCell},
+    ecs::{
+        change_detection::Tick, component::ComponentId, world::unsafe_world_cell::UnsafeWorldCell,
+    },
     prelude::*,
     ptr::Ptr,
     state::app::StatesPlugin,
@@ -67,6 +69,78 @@ fn removed_and_reinserted_without_confirmed_history_is_not_sent() {
     assert_eq!(client_value(&mut client_app), Some(V(1)));
 }
 
+/// The live component runs ahead of the confirmed tick, so once it stops
+/// changing, the confirmed values it went through still have to reach the
+/// client.
+#[test]
+fn confirmed_values_reach_the_client_after_the_live_value_stops_changing() {
+    let (mut server_app, mut client_app) = confirmed_pair();
+    let server_entity = spawn_confirmed(&mut server_app, &mut client_app);
+    let tick = next_send_tick(&server_app);
+    record(&mut server_app, server_entity, tick + 1, Some(V(1)));
+    record(&mut server_app, server_entity, tick + 2, Some(V(2)));
+    *server_app.world_mut().get_mut::<V>(server_entity).unwrap() = V(2);
+
+    let mut values = Vec::new();
+    for _ in 0..3 {
+        exchange(&mut server_app, &mut client_app);
+        values.push(client_value(&mut client_app));
+    }
+
+    assert_eq!(values, [Some(V(0)), Some(V(1)), Some(V(2))]);
+}
+
+/// A confirmed change whose acknowledgment is lost is sent again, though the
+/// live value never changed, and is no longer sent once acknowledged.
+#[test]
+fn confirmed_change_is_resent_until_acknowledged() {
+    let (mut server_app, mut client_app) = confirmed_pair();
+    let server_entity = spawn_confirmed(&mut server_app, &mut client_app);
+    let tick = next_send_tick(&server_app);
+    record(&mut server_app, server_entity, tick, Some(V(1)));
+
+    server_app.update();
+    server_app.exchange_with_client(&mut client_app);
+    client_app.update();
+    let lost_acks = client_app
+        .world_mut()
+        .resource_mut::<ClientMessages>()
+        .drain_sent()
+        .count();
+    let first_receipt = client_change_tick(&mut client_app);
+    exchange(&mut server_app, &mut client_app);
+    let resent = client_change_tick(&mut client_app);
+    exchange(&mut server_app, &mut client_app);
+
+    assert_eq!(lost_acks, 1);
+    assert!(
+        first_receipt.get() < resent.get(),
+        "the lost change is sent again"
+    );
+    assert_eq!(
+        resent,
+        client_change_tick(&mut client_app),
+        "the acknowledged change is not sent again"
+    );
+    assert_eq!(client_value(&mut client_app), Some(V(1)));
+}
+
+/// A live change the confirmed history has yet to record is not sent: the
+/// confirmed value it would carry is the one the client already has.
+#[test]
+fn live_change_ahead_of_the_confirmed_history_is_not_sent() {
+    let (mut server_app, mut client_app) = confirmed_pair();
+    let server_entity = spawn_confirmed(&mut server_app, &mut client_app);
+    client_app.init_resource::<ClientReplicationStats>();
+    *server_app.world_mut().get_mut::<V>(server_entity).unwrap() = V(1);
+
+    exchange(&mut server_app, &mut client_app);
+
+    let stats = client_app.world().resource::<ClientReplicationStats>();
+    assert_eq!(stats.components_changed, 0);
+    assert_eq!(client_value(&mut client_app), Some(V(0)));
+}
+
 /// The confirmed values of a component removed live keep replicating up to the
 /// tick before its confirmed removal.
 #[test]
@@ -127,8 +201,8 @@ fn reinsertion_within_the_lead_follows_the_confirmed_removal() {
     assert_eq!(values, [Some(V(0)), None, Some(V(3))]);
     assert_eq!(
         components_changed,
-        [1, 1, 1],
-        "each tick replicates the component once: its confirmed value, its removal, its re-insertion"
+        [0, 1, 1],
+        "the unchanged confirmed value is not sent again, then its removal and its re-insertion are, once each"
     );
 }
 
@@ -254,7 +328,7 @@ fn confirmed_pair() -> (App, App) {
     server_app
         .world_mut()
         .resource_mut::<ConfirmedReplicationSource>()
-        .set(confirmed_v, confirmed_v_ahead);
+        .set(confirmed_v, confirmed_v_ahead, confirmed_v_changed);
     server_app.connect_client(&mut client_app);
     (server_app, client_app)
 }
@@ -287,6 +361,15 @@ fn exchange(server_app: &mut App, client_app: &mut App) {
     server_app.exchange_with_client(client_app);
     client_app.update();
     server_app.exchange_with_client(client_app);
+}
+
+fn client_change_tick(client_app: &mut App) -> Tick {
+    client_app
+        .world_mut()
+        .query::<Ref<V>>()
+        .single(client_app.world())
+        .unwrap()
+        .last_changed()
 }
 
 fn client_value(client_app: &mut App) -> Option<V> {
@@ -338,6 +421,19 @@ unsafe fn confirmed_v_ahead(
         confirmed.removed |= state.is_none();
     }
     confirmed
+}
+
+unsafe fn confirmed_v_changed(
+    world: UnsafeWorldCell,
+    entity: Entity,
+    _component: ComponentId,
+    after: RepliconTick,
+    until: RepliconTick,
+) -> bool {
+    confirmed_history(world, entity)
+        .into_iter()
+        .flat_map(|confirmed| &confirmed.0)
+        .any(|&(at, _)| after.get() < at && at <= until.get())
 }
 
 fn confirmed_history(world: UnsafeWorldCell<'_>, entity: Entity) -> Option<&ConfirmedV> {

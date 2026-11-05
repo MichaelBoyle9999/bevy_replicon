@@ -16,7 +16,7 @@ use log::debug;
 use crate::{
     prelude::*,
     server::confirmed_source::{
-        ConfirmedAhead, ConfirmedAheadFn, ConfirmedLookup, ConfirmedLookupFn,
+        ConfirmedAhead, ConfirmedAheadFn, ConfirmedChangedFn, ConfirmedLookup, ConfirmedLookupFn,
     },
     shared::replication::rules::ReplicationRules,
 };
@@ -111,6 +111,26 @@ impl<'w> ReplicationQuery<'w, '_> {
     ) -> ConfirmedAhead {
         // SAFETY: caller upholds the `ConfirmedAheadFn` contract.
         unsafe { ahead(self.world, entity, component_id, tick) }
+    }
+
+    /// Asks a confirmed-value source whether it records a change for
+    /// `component` on `entity` after `after`, up to `until`, using this query's
+    /// world access.
+    ///
+    /// # Safety
+    ///
+    /// `changed` must obey the [`ConfirmedChangedFn`] contract — read-only
+    /// world access.
+    pub(super) unsafe fn confirmed_changed(
+        &self,
+        changed: ConfirmedChangedFn,
+        entity: Entity,
+        component_id: ComponentId,
+        after: RepliconTick,
+        until: RepliconTick,
+    ) -> bool {
+        // SAFETY: caller upholds the `ConfirmedChangedFn` contract.
+        unsafe { changed(self.world, entity, component_id, after, until) }
     }
 }
 
