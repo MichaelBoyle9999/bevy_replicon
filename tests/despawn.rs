@@ -1,7 +1,10 @@
 use bevy::{prelude::*, state::app::StatesPlugin};
 use bevy_replicon::{
     prelude::*,
-    shared::server_entity_map::ServerEntityMap,
+    shared::{
+        replication::registry::{ReplicationRegistry, ctx::DespawnCtx},
+        server_entity_map::ServerEntityMap,
+    },
     test_app::{ServerTestAppExt, TestClientEntity},
 };
 use serde::{Deserialize, Serialize};
@@ -43,6 +46,63 @@ fn single() {
     client_app.update();
 
     assert!(client_app.world().get_entity(client_entity).is_err());
+
+    let entity_map = client_app.world().resource::<ServerEntityMap>();
+    assert!(entity_map.to_client().is_empty());
+    assert!(entity_map.to_server().is_empty());
+}
+
+#[test]
+fn mutation_received_with_the_despawn() {
+    let mut server_app = App::new();
+    let mut client_app = App::new();
+    for app in [&mut server_app, &mut client_app] {
+        app.add_plugins((
+            MinimalPlugins,
+            StatesPlugin,
+            RepliconPlugins.set(ServerPlugin::new(PostUpdate)),
+        ))
+        .replicate::<CounterComponent>()
+        .finish();
+    }
+    client_app
+        .world_mut()
+        .resource_mut::<ReplicationRegistry>()
+        .despawn = mark_despawned;
+
+    server_app.connect_client(&mut client_app);
+
+    let server_entity = server_app
+        .world_mut()
+        .spawn((Replicated, CounterComponent(0)))
+        .id();
+
+    server_app.update();
+    server_app.exchange_with_client(&mut client_app);
+    client_app.update();
+    server_app.exchange_with_client(&mut client_app);
+
+    server_app
+        .world_mut()
+        .get_mut::<CounterComponent>(server_entity)
+        .unwrap()
+        .0 = 1;
+    server_app.update();
+    server_app.world_mut().despawn(server_entity);
+    server_app.update();
+    server_app.exchange_with_client(&mut client_app);
+    client_app.update();
+
+    let (despawned, counter) = client_app
+        .world_mut()
+        .query::<(Has<Despawned>, &CounterComponent)>()
+        .single(client_app.world())
+        .unwrap();
+    assert!(despawned);
+    assert_eq!(
+        counter.0, 1,
+        "a mutation sent before the despawn must apply even when it arrives with it"
+    );
 
     let entity_map = client_app.world().resource::<ServerEntityMap>();
     assert!(entity_map.to_client().is_empty());
@@ -309,6 +369,64 @@ fn visibility_lose() {
 }
 
 #[test]
+fn visibility_lose_and_regain_in_one_receive() {
+    let mut server_app = App::new();
+    let mut client_app = App::new();
+    for app in [&mut server_app, &mut client_app] {
+        app.add_plugins((
+            MinimalPlugins,
+            StatesPlugin,
+            RepliconPlugins.set(ServerPlugin::new(PostUpdate)),
+        ))
+        .add_visibility_filter::<EntityVisibility>()
+        .finish();
+    }
+
+    server_app.connect_client(&mut client_app);
+
+    let client = **client_app.world().resource::<TestClientEntity>();
+    server_app
+        .world_mut()
+        .entity_mut(client)
+        .insert(EntityVisibility);
+
+    let server_entity = server_app
+        .world_mut()
+        .spawn((Replicated, EntityVisibility))
+        .id();
+
+    server_app.update();
+    server_app.exchange_with_client(&mut client_app);
+    client_app.update();
+    server_app.exchange_with_client(&mut client_app);
+
+    server_app
+        .world_mut()
+        .entity_mut(client)
+        .remove::<EntityVisibility>();
+    server_app.update();
+    server_app
+        .world_mut()
+        .entity_mut(client)
+        .insert(EntityVisibility);
+    server_app.update();
+    server_app.exchange_with_client(&mut client_app);
+    client_app.update();
+
+    let client_entity = client_app
+        .world_mut()
+        .query_filtered::<Entity, With<Remote>>()
+        .single(client_app.world())
+        .unwrap();
+    let entity_map = client_app.world().resource::<ServerEntityMap>();
+    assert_eq!(
+        entity_map.to_client().get(&server_entity),
+        Some(&client_entity),
+        "the entity respawned after the despawn in the same receive must stay mapped"
+    );
+}
+
+#[test]
 fn visibility_lose_with_component_scope() {
     let mut server_app = App::new();
     let mut client_app = App::new();
@@ -389,6 +507,16 @@ fn with_visibility_gain_and_signature() {
 
 #[derive(Component, Deserialize, Serialize)]
 struct TestComponent;
+
+#[derive(Component, Deserialize, Serialize)]
+struct CounterComponent(u32);
+
+#[derive(Component)]
+struct Despawned;
+
+fn mark_despawned(_ctx: &DespawnCtx, mut entity: EntityWorldMut) {
+    entity.insert(Despawned);
+}
 
 #[derive(Component)]
 #[component(immutable)]
