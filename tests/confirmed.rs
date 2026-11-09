@@ -132,12 +132,12 @@ fn live_change_ahead_of_the_confirmed_history_is_not_sent() {
     let (mut server_app, mut client_app) = confirmed_pair();
     let server_entity = spawn_confirmed(&mut server_app, &mut client_app);
     client_app.init_resource::<ClientReplicationStats>();
+    let before = client_components_changed(&client_app);
     *server_app.world_mut().get_mut::<V>(server_entity).unwrap() = V(1);
 
     exchange(&mut server_app, &mut client_app);
 
-    let stats = client_app.world().resource::<ClientReplicationStats>();
-    assert_eq!(stats.components_changed, 0);
+    assert_eq!(client_components_changed(&client_app), before);
     assert_eq!(client_value(&mut client_app), Some(V(0)));
 }
 
@@ -185,17 +185,10 @@ fn reinsertion_within_the_lead_follows_the_confirmed_removal() {
     let mut values = Vec::new();
     let mut components_changed = Vec::new();
     for _ in 0..3 {
-        let before = client_app
-            .world()
-            .resource::<ClientReplicationStats>()
-            .components_changed;
+        let before = client_components_changed(&client_app);
         exchange(&mut server_app, &mut client_app);
         values.push(client_value(&mut client_app));
-        let after = client_app
-            .world()
-            .resource::<ClientReplicationStats>()
-            .components_changed;
-        components_changed.push(after - before);
+        components_changed.push(client_components_changed(&client_app) - before);
     }
 
     assert_eq!(values, [Some(V(0)), None, Some(V(3))]);
@@ -370,6 +363,13 @@ fn client_change_tick(client_app: &mut App) -> Tick {
         .single(client_app.world())
         .unwrap()
         .last_changed()
+}
+
+fn client_components_changed(client_app: &App) -> usize {
+    client_app
+        .world()
+        .resource::<ClientReplicationStats>()
+        .components_changed
 }
 
 fn client_value(client_app: &mut App) -> Option<V> {
