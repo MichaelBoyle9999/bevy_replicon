@@ -93,6 +93,17 @@ impl<'a> SerdeFns<'a> {
         }
     }
 
+    /// Skips the component's data without writing it or mapping its entities.
+    pub(crate) fn skip(&self, ctx: &mut WriteCtx, message: &mut Bytes) -> Result<()> {
+        // SAFETY: `RuleFns` and `ComponentFns` belong to the same type.
+        unsafe { self.component_fns.skip(ctx, self.rule_fns, message) }
+    }
+
+    /// Returns, per marker, whether that marker has functions for this component.
+    pub(crate) fn has_marker_fns(&self) -> impl Iterator<Item = bool> + '_ {
+        self.component_fns.has_marker_fns()
+    }
+
     /// Same as [`Self::write`], but calls the assigned remove function.
     pub(crate) fn remove(
         &self,

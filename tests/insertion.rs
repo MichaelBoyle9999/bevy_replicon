@@ -360,7 +360,7 @@ fn receive_fns() {
             RepliconPlugins.set(ServerPlugin::new(PostUpdate)),
         ))
         .replicate::<Original>()
-        .set_receive_fns(replace, receive_fns::default_remove::<Replaced>)
+        .set_receive_fns(replace::<Original>, receive_fns::default_remove::<Replaced>)
         .finish();
     }
 
@@ -400,7 +400,10 @@ fn marker() {
         ))
         .register_marker::<ReplaceMarker>()
         .replicate::<Original>()
-        .set_marker_fns::<ReplaceMarker, _>(replace, receive_fns::default_remove::<Replaced>)
+        .set_marker_fns::<ReplaceMarker, _>(
+            replace::<Original>,
+            receive_fns::default_remove::<Replaced>,
+        )
         .finish();
     }
 
@@ -433,6 +436,174 @@ fn marker() {
     let client_entity = client_app.world().entity(client_entity);
     assert!(!client_entity.contains::<Original>());
     assert!(client_entity.contains::<Replaced>());
+}
+
+#[test]
+fn marker_inserted_with_the_components() {
+    let mut server_app = App::new();
+    let mut client_app = App::new();
+    for app in [&mut server_app, &mut client_app] {
+        app.add_plugins((
+            MinimalPlugins,
+            StatesPlugin,
+            RepliconPlugins.set(ServerPlugin::new(PostUpdate)),
+        ))
+        .register_marker::<ReplaceMarker>()
+        .replicate::<Original>()
+        .replicate::<ReplaceMarker>()
+        .set_marker_fns::<ReplaceMarker, _>(
+            replace::<Original>,
+            receive_fns::default_remove::<Replaced>,
+        )
+        .finish();
+    }
+
+    server_app.connect_client(&mut client_app);
+
+    server_app
+        .world_mut()
+        .spawn((Replicated, Original, ReplaceMarker));
+
+    server_app.update();
+    server_app.exchange_with_client(&mut client_app);
+    client_app.update();
+
+    let mut components =
+        client_app
+            .world_mut()
+            .query_filtered::<(), (With<Replaced>, With<ReplaceMarker>, Without<Original>)>();
+    assert_eq!(components.iter(client_app.world()).count(), 1);
+}
+
+#[test]
+fn marker_required_by_an_inserted_component() {
+    let mut server_app = App::new();
+    let mut client_app = App::new();
+    for app in [&mut server_app, &mut client_app] {
+        app.add_plugins((
+            MinimalPlugins,
+            StatesPlugin,
+            RepliconPlugins.set(ServerPlugin::new(PostUpdate)),
+        ))
+        .register_marker::<ReplaceMarker>()
+        .replicate::<Original>()
+        .replicate::<RequiresReplaceMarker>()
+        .set_marker_fns::<ReplaceMarker, _>(
+            replace::<Original>,
+            receive_fns::default_remove::<Replaced>,
+        )
+        .finish();
+    }
+
+    server_app.connect_client(&mut client_app);
+
+    server_app
+        .world_mut()
+        .spawn((Replicated, Original, RequiresReplaceMarker(0)));
+
+    server_app.update();
+    server_app.exchange_with_client(&mut client_app);
+    client_app.update();
+
+    let mut components =
+        client_app
+            .world_mut()
+            .query_filtered::<(), (With<Replaced>, With<ReplaceMarker>, Without<Original>)>();
+    assert_eq!(components.iter(client_app.world()).count(), 1);
+}
+
+#[test]
+fn marker_not_brought_by_a_component_already_present() {
+    let mut server_app = App::new();
+    let mut client_app = App::new();
+    for app in [&mut server_app, &mut client_app] {
+        app.add_plugins((
+            MinimalPlugins,
+            StatesPlugin,
+            RepliconPlugins.set(ServerPlugin::new(PostUpdate)),
+        ))
+        .register_marker::<ReplaceMarker>()
+        .replicate::<Original>()
+        .replicate::<RequiresReplaceMarker>()
+        .set_marker_fns::<ReplaceMarker, _>(
+            replace::<Original>,
+            receive_fns::default_remove::<Replaced>,
+        )
+        .finish();
+    }
+
+    server_app.connect_client(&mut client_app);
+
+    let server_entity = server_app
+        .world_mut()
+        .spawn((Replicated, RequiresReplaceMarker(0)))
+        .id();
+
+    server_app.update();
+    server_app.exchange_with_client(&mut client_app);
+    client_app.update();
+    server_app.exchange_with_client(&mut client_app);
+
+    let client_entity = client_app
+        .world_mut()
+        .query_filtered::<Entity, With<RequiresReplaceMarker>>()
+        .single(client_app.world())
+        .unwrap();
+    client_app
+        .world_mut()
+        .entity_mut(client_entity)
+        .remove::<ReplaceMarker>();
+
+    let mut server_entity = server_app.world_mut().entity_mut(server_entity);
+    server_entity.insert(Original);
+    server_entity.get_mut::<RequiresReplaceMarker>().unwrap().0 = 1;
+
+    server_app.update();
+    server_app.exchange_with_client(&mut client_app);
+    client_app.update();
+
+    let client_entity = client_app.world().entity(client_entity);
+    assert!(client_entity.contains::<Original>());
+    assert!(!client_entity.contains::<Replaced>());
+    assert!(!client_entity.contains::<ReplaceMarker>());
+    assert_eq!(client_entity.get::<RequiresReplaceMarker>().unwrap().0, 1);
+}
+
+#[test]
+fn marker_not_brought_by_a_component_its_functions_replace() {
+    let mut server_app = App::new();
+    let mut client_app = App::new();
+    for app in [&mut server_app, &mut client_app] {
+        app.add_plugins((
+            MinimalPlugins,
+            StatesPlugin,
+            RepliconPlugins.set(ServerPlugin::new(PostUpdate)),
+        ))
+        .register_marker::<ReplaceMarker>()
+        .replicate::<RequiresReplaceMarker>()
+        .set_marker_fns::<ReplaceMarker, RequiresReplaceMarker>(
+            replace::<RequiresReplaceMarker>,
+            receive_fns::default_remove::<Replaced>,
+        )
+        .finish();
+    }
+
+    server_app.connect_client(&mut client_app);
+
+    server_app
+        .world_mut()
+        .spawn((Replicated, RequiresReplaceMarker(0)));
+
+    server_app.update();
+    server_app.exchange_with_client(&mut client_app);
+    client_app.update();
+
+    let mut components = client_app.world_mut().query_filtered::<(), (
+        With<RequiresReplaceMarker>,
+        With<ReplaceMarker>,
+        Without<Replaced>,
+    )>();
+    assert_eq!(components.iter(client_app.world()).count(), 1);
 }
 
 #[test]
@@ -738,8 +909,12 @@ struct A;
 #[derive(Component, Deserialize, Serialize)]
 struct B;
 
-#[derive(Component)]
+#[derive(Component, Default, Deserialize, Serialize)]
 struct ReplaceMarker;
+
+#[derive(Component, Deserialize, Serialize)]
+#[require(ReplaceMarker)]
+struct RequiresReplaceMarker(u8);
 
 #[derive(Component, Deserialize, Serialize)]
 struct Original;
@@ -773,10 +948,10 @@ impl VisibilityFilter for ComponentVisibility {
     }
 }
 
-/// Deserializes [`OriginalComponent`], but ignores it and inserts [`ReplacedComponent`].
-fn replace(
+/// Deserializes a component, but ignores it and inserts [`Replaced`].
+fn replace<C: Component>(
     ctx: &mut WriteCtx,
-    rule_fns: &RuleFns<Original>,
+    rule_fns: &RuleFns<C>,
     entity: &mut DeferredEntity,
     message: &mut Bytes,
 ) -> Result<()> {

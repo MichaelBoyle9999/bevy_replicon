@@ -18,6 +18,7 @@ pub(crate) struct ComponentFns {
     serialize: UntypedSerializeFn,
     write: UntypedWriteFn,
     consume: UntypedConsumeFn,
+    skip: UntypedConsumeFn,
     receive: UntypedReceiveFns,
     markers: Vec<Option<UntypedReceiveFns>>,
 }
@@ -29,6 +30,7 @@ impl ComponentFns {
             serialize: untyped_serialize::<C>,
             write: untyped_write::<C>,
             consume: untyped_consume::<C>,
+            skip: untyped_skip::<C>,
             receive: UntypedReceiveFns::default_fns::<C>(),
             markers: vec![None; marker_slots],
         }
@@ -153,6 +155,26 @@ impl ComponentFns {
         }
     }
 
+    /// Skips the component's data without writing it or mapping its entities.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `rule_fns` was created for the same type as this instance.
+    pub(crate) unsafe fn skip(
+        &self,
+        ctx: &mut WriteCtx,
+        rule_fns: &UntypedRuleFns,
+        message: &mut Bytes,
+    ) -> Result<()> {
+        unsafe { (self.skip)(ctx, rule_fns, message) }
+    }
+
+    /// Returns, per marker in [`ReceiveMarkers`] order, whether that marker has functions
+    /// for this component.
+    pub(crate) fn has_marker_fns(&self) -> impl Iterator<Item = bool> + '_ {
+        self.markers.iter().map(Option::is_some)
+    }
+
     /// Same as [`Self::write`], but calls the assigned remove function.
     pub(crate) fn remove(
         &self,
@@ -231,4 +253,17 @@ unsafe fn untyped_consume<C: Component>(
     message: &mut Bytes,
 ) -> Result<()> {
     unsafe { rule_fns.typed::<C>().consume(ctx, message) }
+}
+
+/// Resolves `rule_fns` to `C` and calls [`RuleFns::skip`](super::rule_fns::RuleFns) for `C`.
+///
+/// # Safety
+///
+/// The caller must ensure that `rule_fns` was created for `C`.
+unsafe fn untyped_skip<C: Component>(
+    ctx: &mut WriteCtx,
+    rule_fns: &UntypedRuleFns,
+    message: &mut Bytes,
+) -> Result<()> {
+    unsafe { rule_fns.typed::<C>().skip(ctx, message) }
 }

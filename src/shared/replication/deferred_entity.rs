@@ -53,6 +53,24 @@ impl<'w> DeferredEntity<'w> {
         self.entity.get_mut()
     }
 
+    /// Gets mutable access to the entity's component of type `C`, else to its buffered
+    /// insertion, buffering `f`'s value first if there is none.
+    pub fn get_mut_or_insert_with<C: Component<Mutability = Mutable>>(
+        &mut self,
+        f: impl FnOnce() -> C,
+    ) -> &mut C {
+        let component_id = self.register_component::<C>();
+        if self.entity.contains_id(component_id) {
+            return self.entity.get_mut::<C>().unwrap().into_inner();
+        }
+        // SAFETY: component ID belongs to this type.
+        unsafe {
+            self.changes
+                .insertions
+                .get_mut_or_insert_with(component_id, f)
+        }
+    }
+
     fn register_component<C: Component>(&mut self) -> ComponentId {
         // SAFETY: no location update is needed because we only register the component ID.
         unsafe { self.world_mut().register_component::<C>() }
@@ -143,6 +161,29 @@ impl DeferredInsertions {
         }
     }
 
+    /// Returns the buffered `C`, buffering `f`'s value first if there is none.
+    ///
+    /// # Safety
+    ///
+    /// Component ID should correspond to the passed type.
+    unsafe fn get_mut_or_insert_with<C: Component>(
+        &mut self,
+        component_id: ComponentId,
+        f: impl FnOnce() -> C,
+    ) -> &mut C {
+        let index = match self.ids.iter().position(|&id| id == component_id) {
+            Some(index) => index,
+            None => {
+                // SAFETY: the caller guarantees that the ID belongs to `C`.
+                unsafe { self.insert(f(), component_id) };
+                self.ids.len() - 1
+            }
+        };
+
+        // SAFETY: the data at this offset was written as `C`, the type of its ID.
+        unsafe { &mut *(self.data.as_mut_ptr().byte_add(self.offsets[index]) as *mut C) }
+    }
+
     fn apply(&mut self, entity: &mut EntityWorldMut) {
         // SAFETY: iterator produces valid pointers for each component ID.
         unsafe {
@@ -225,6 +266,33 @@ mod tests {
             after_archetypes,
             "removals shouldn't create intermediate archetypes"
         );
+    }
+
+    #[test]
+    fn get_mut_or_insert_with() {
+        let mut world = World::new();
+        let mut changes = DeferredChanges::default();
+        let mut entity = DeferredEntity::new(world.spawn(Trivial(1)), &mut changes);
+
+        entity.get_mut_or_insert_with(|| Trivial(0)).0 += 1;
+        entity.insert(Unit).insert(WithBox(Box::new(Trivial(4))));
+        entity.get_mut_or_insert_with(|| WithVec(vec![1])).0.push(2);
+        entity
+            .get_mut_or_insert_with(|| WithVec(Vec::new()))
+            .0
+            .push(3);
+        assert!(
+            !entity.contains::<WithVec>(),
+            "a buffered component should wait for the flush"
+        );
+
+        entity.flush();
+
+        assert_eq!(**entity.get::<Trivial>().unwrap(), 2);
+        assert!(entity.contains::<Unit>());
+        let with_box = entity.get::<WithBox>().unwrap();
+        assert_eq!(**with_box.downcast_ref::<Trivial>().unwrap(), 4);
+        assert_eq!(**entity.get::<WithVec>().unwrap(), [1, 2, 3]);
     }
 
     #[derive(Component)]

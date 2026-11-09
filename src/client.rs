@@ -570,6 +570,31 @@ fn apply_changes(
     confirm_tick(&mut client_entity, params.replicated, message_tick);
 
     let mut data = message.split_to(data_size);
+    if params.entity_markers.any_absent() {
+        let mut scanned = data.clone();
+        apply_array(ArrayKind::Dynamic, &mut scanned, |data| {
+            let fns_id = postcard_utils::from_buf(data)?;
+            let (_, component_id, fns) = params.registry.get(fns_id);
+            if !client_entity.contains_id(component_id) {
+                params.entity_markers.insert(
+                    params.receive_markers,
+                    client_entity.world().components(),
+                    component_id,
+                    fns.has_marker_fns(),
+                );
+            }
+            let mut ctx = WriteCtx {
+                entity_map: params.entity_map,
+                type_registry: params.type_registry,
+                component_id,
+                message_tick,
+                spawner: &mut spawner,
+                ignore_mapping: true,
+            };
+            fns.skip(&mut ctx, data)
+        })?;
+    }
+
     let len = apply_array(ArrayKind::Dynamic, &mut data, |data| {
         let fns_id = postcard_utils::from_buf(data)?;
         let (_, component_id, fns) = params.registry.get(fns_id);

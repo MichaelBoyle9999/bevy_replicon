@@ -1,6 +1,9 @@
 use core::cmp::Reverse;
 
-use bevy::{ecs::component::ComponentId, prelude::*};
+use bevy::{
+    ecs::component::{ComponentId, Components},
+    prelude::*,
+};
 use log::debug;
 
 use super::registry::{
@@ -36,14 +39,16 @@ pub trait AppMarkerExt {
     instead of [`default_write`](super::registry::receive_fns::default_write) /
     [`default_insert_write`](super::registry::receive_fns::default_insert_write) and
     [`default_remove`](super::registry::receive_fns::default_remove).
+    A marker that a received insertion brings, as the inserted component itself or as one of
+    its required components, counts as present for every component in that insertion.
     See also [`Self::set_receive_fns`].
 
     # Examples
 
     In this example we write all received updates for `Health` component into user's
     `History<Health>` if `Predicted` marker is present on the client entity. In this
-    scenario, you'd insert `Predicted` the first time the entity is replicated.
-    Then `Health` updates after that will be inserted to the history.
+    scenario, you'd replicate `Predicted`, or a component requiring it, with the entity,
+    so `Health` values from its first replication onward are inserted to the history.
 
     ```
     # use bevy::state::app::StatesPlugin;
@@ -307,6 +312,40 @@ impl EntityMarkers {
             self.markers.push(contains);
             if contains && marker.config.need_history {
                 self.need_history = true;
+            }
+        }
+    }
+
+    /// Returns `true` if a registered marker is missing from the entity.
+    pub(crate) fn any_absent(&self) -> bool {
+        self.markers.contains(&false)
+    }
+
+    /// Marks each marker that inserting `inserted` brings, as itself or as one of its
+    /// required components, as present.
+    ///
+    /// A marker with functions for `inserted` (per `has_marker_fns`, in marker order) replaces
+    /// its live insertion, so `inserted` doesn't bring that marker.
+    pub(crate) fn insert(
+        &mut self,
+        markers: &ReceiveMarkers,
+        components: &Components,
+        inserted: ComponentId,
+        has_marker_fns: impl Iterator<Item = bool>,
+    ) {
+        let required = components
+            .get_info(inserted)
+            .map(|info| info.required_components());
+        let slots = markers.0.iter().zip(&mut self.markers).zip(has_marker_fns);
+        for ((marker, contains), routed) in slots {
+            let brought = !routed
+                && (marker.component_id == inserted
+                    || required.is_some_and(|required| {
+                        required.iter_ids().any(|id| id == marker.component_id)
+                    }));
+            if brought {
+                *contains = true;
+                self.need_history |= marker.config.need_history;
             }
         }
     }

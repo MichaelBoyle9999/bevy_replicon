@@ -162,6 +162,11 @@ impl<C: Component> RuleFns<C> {
     pub(super) fn consume(&self, ctx: &mut WriteCtx, message: &mut Bytes) -> Result<()> {
         (self.consume)(self.deserialize, ctx, message)
     }
+
+    /// Skips a component in a message, deserializing it without entity mapping and dropping it.
+    pub(super) fn skip(&self, ctx: &mut WriteCtx, message: &mut Bytes) -> Result<()> {
+        consume_as_deserialize(self.deserialize, ctx, message)
+    }
 }
 
 impl<C: Component + Serialize + DeserializeOwned> Default for RuleFns<C> {
