@@ -1,4 +1,4 @@
-use core::{alloc::Layout, ptr::NonNull};
+use core::{alloc::Layout, num::NonZeroUsize, ptr::NonNull};
 
 use bevy::{
     ecs::component::{ComponentId, Mutable},
@@ -126,7 +126,7 @@ impl DeferredChanges {
 pub(crate) struct DeferredInsertions {
     ids: Vec<ComponentId>,
     offsets: Vec<usize>,
-    data: Vec<u8>,
+    data: AlignedBuffer,
 }
 
 impl DeferredInsertions {
@@ -137,28 +137,12 @@ impl DeferredInsertions {
     /// Component ID should correspond to the passed type, otherwise [`Self::apply`] won't
     /// write the data correctly.
     unsafe fn insert<C: Component>(&mut self, component: C, component_id: ComponentId) {
-        let layout = Layout::new::<C>();
-
-        // If items would otherwise not be aligned, add alignment.
-        let align = layout.align();
-        let extra_offset = if !self.data.len().is_multiple_of(align) {
-            align - (self.data.len() % align)
-        } else {
-            0
-        };
-
-        let grow = layout.size() + extra_offset;
-        let offset = self.data.len() + extra_offset;
-
+        let offset = self.data.reserve(Layout::new::<C>());
         self.ids.push(component_id);
         self.offsets.push(offset);
-        self.data.resize(self.data.len() + grow, 0);
 
-        // SAFETY: pointer references a properly allocated memory.
-        unsafe {
-            let ptr = self.data.as_mut_ptr().byte_add(offset) as *mut C;
-            ptr.write(component);
-        }
+        // SAFETY: the reserved space is allocated and aligned for `C`.
+        unsafe { self.data.at(offset).cast::<C>().write(component) };
     }
 
     /// Returns the buffered `C`, buffering `f`'s value first if there is none.
@@ -181,16 +165,16 @@ impl DeferredInsertions {
         };
 
         // SAFETY: the data at this offset was written as `C`, the type of its ID.
-        unsafe { &mut *(self.data.as_mut_ptr().byte_add(self.offsets[index]) as *mut C) }
+        unsafe { self.data.at(self.offsets[index]).cast::<C>().as_mut() }
     }
 
     fn apply(&mut self, entity: &mut EntityWorldMut) {
         // SAFETY: iterator produces valid pointers for each component ID.
         unsafe {
-            let iter = self.offsets.iter().map(|&offset| {
-                let ptr = PtrMut::new(NonNull::new_unchecked(self.data.as_mut_ptr()));
-                ptr.byte_add(offset).promote()
-            });
+            let iter = self
+                .offsets
+                .iter()
+                .map(|&offset| PtrMut::new(self.data.at(offset)).promote());
             entity.insert_by_ids(&self.ids, iter);
         }
     }
@@ -203,6 +187,92 @@ impl DeferredInsertions {
         self.ids.clear();
         self.offsets.clear();
         self.data.clear();
+    }
+}
+
+/// Bytes whose start is aligned for every layout reserved in them.
+struct AlignedBuffer {
+    ptr: NonNull<u8>,
+    len: usize,
+    capacity: Layout,
+}
+
+// SAFETY: the buffer holds only components, which are `Send` and `Sync`.
+unsafe impl Send for AlignedBuffer {}
+// SAFETY: as above.
+unsafe impl Sync for AlignedBuffer {}
+
+impl Default for AlignedBuffer {
+    fn default() -> Self {
+        Self {
+            ptr: NonNull::dangling(),
+            len: 0,
+            capacity: Layout::new::<()>(),
+        }
+    }
+}
+
+impl AlignedBuffer {
+    /// Reserves space for `layout` at an offset whose address is aligned for it, and returns the offset.
+    fn reserve(&mut self, layout: Layout) -> usize {
+        let offset = self.len.next_multiple_of(layout.align());
+        let end = offset
+            .checked_add(layout.size())
+            .expect("buffered insertions should fit in the address space");
+        if end > self.capacity.size() || layout.align() > self.capacity.align() {
+            let size = end.max(self.capacity.size().saturating_mul(2));
+            let align = layout.align().max(self.capacity.align());
+            self.reallocate(
+                Layout::from_size_align(size, align)
+                    .expect("buffered insertions should fit in the address space"),
+            );
+        }
+        self.len = end;
+        offset
+    }
+
+    fn reallocate(&mut self, capacity: Layout) {
+        let ptr = if capacity.size() == 0 {
+            NonNull::without_provenance(
+                NonZeroUsize::new(capacity.align()).expect("alignment should be non-zero"),
+            )
+        } else {
+            // SAFETY: the layout has a non-zero size.
+            let ptr = unsafe { alloc::alloc::alloc(capacity) };
+            NonNull::new(ptr).unwrap_or_else(|| alloc::alloc::handle_alloc_error(capacity))
+        };
+        // SAFETY: both allocations hold at least `len` bytes and are distinct.
+        unsafe { ptr.copy_from_nonoverlapping(self.ptr, self.len) };
+        self.deallocate();
+        self.ptr = ptr;
+        self.capacity = capacity;
+    }
+
+    fn deallocate(&mut self) {
+        if self.capacity.size() != 0 {
+            // SAFETY: the pointer was allocated with this layout.
+            unsafe { alloc::alloc::dealloc(self.ptr.as_ptr(), self.capacity) };
+        }
+    }
+
+    /// Returns a pointer to the byte at `offset`.
+    ///
+    /// # Safety
+    ///
+    /// `offset` should be within the reserved bytes.
+    unsafe fn at(&mut self, offset: usize) -> NonNull<u8> {
+        // SAFETY: the caller guarantees that the offset is within the allocation.
+        unsafe { self.ptr.byte_add(offset) }
+    }
+
+    fn clear(&mut self) {
+        self.len = 0;
+    }
+}
+
+impl Drop for AlignedBuffer {
+    fn drop(&mut self) {
+        self.deallocate();
     }
 }
 
@@ -294,6 +364,76 @@ mod tests {
         assert_eq!(**with_box.downcast_ref::<Trivial>().unwrap(), 4);
         assert_eq!(**entity.get::<WithVec>().unwrap(), [1, 2, 3]);
     }
+
+    #[test]
+    fn buffered_components_are_aligned() {
+        let mut world = World::new();
+        let mut changes = DeferredChanges::default();
+        let mut entity = DeferredEntity::new(world.spawn_empty(), &mut changes);
+
+        entity
+            .insert(Byte(1))
+            .insert(AlignedUnit)
+            .insert(Align32(2))
+            .insert(Bytes3([3; 3]))
+            .insert(Align4096(4))
+            .insert(Trivial(5));
+
+        assert!(is_aligned(entity.get_mut_or_insert_with(|| Byte(0))));
+        assert!(is_aligned(entity.get_mut_or_insert_with(|| AlignedUnit)));
+        assert!(is_aligned(entity.get_mut_or_insert_with(|| Align32(0))));
+        assert!(is_aligned(entity.get_mut_or_insert_with(|| Bytes3([0; 3]))));
+        assert!(is_aligned(entity.get_mut_or_insert_with(|| Align4096(0))));
+        assert!(is_aligned(entity.get_mut_or_insert_with(|| Trivial(0))));
+
+        entity.flush();
+
+        assert_eq!(*entity.get::<Byte>().unwrap(), Byte(1));
+        assert!(entity.contains::<AlignedUnit>());
+        assert_eq!(*entity.get::<Align32>().unwrap(), Align32(2));
+        assert_eq!(*entity.get::<Bytes3>().unwrap(), Bytes3([3; 3]));
+        assert_eq!(*entity.get::<Align4096>().unwrap(), Align4096(4));
+        assert_eq!(**entity.get::<Trivial>().unwrap(), 5);
+    }
+
+    #[test]
+    fn buffer_reused_after_flush_keeps_alignment() {
+        let mut world = World::new();
+        let mut changes = DeferredChanges::default();
+        let mut first = DeferredEntity::new(world.spawn_empty(), &mut changes);
+        first.insert(Align4096(1));
+        first.flush();
+
+        let mut second = DeferredEntity::new(world.spawn_empty(), &mut changes);
+        second.insert(Byte(2));
+        assert!(is_aligned(second.get_mut_or_insert_with(|| Align4096(3))));
+        second.flush();
+
+        assert_eq!(*second.get::<Byte>().unwrap(), Byte(2));
+        assert_eq!(*second.get::<Align4096>().unwrap(), Align4096(3));
+    }
+
+    fn is_aligned<C>(component: &mut C) -> bool {
+        (component as *mut C).is_aligned()
+    }
+
+    #[derive(Component, Debug, PartialEq)]
+    struct Byte(u8);
+
+    #[derive(Component, Debug, PartialEq)]
+    struct Bytes3([u8; 3]);
+
+    #[derive(Component)]
+    #[repr(align(64))]
+    struct AlignedUnit;
+
+    #[derive(Component, Debug, PartialEq)]
+    #[repr(align(32))]
+    struct Align32(u8);
+
+    #[derive(Component, Debug, PartialEq)]
+    #[repr(align(4096))]
+    struct Align4096(u8);
 
     #[derive(Component)]
     struct Unit;
