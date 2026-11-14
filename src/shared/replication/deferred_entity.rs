@@ -1,4 +1,4 @@
-use core::{alloc::Layout, num::NonZeroUsize, ptr::NonNull};
+use core::{alloc::Layout, mem, num::NonZeroUsize, ptr::NonNull};
 
 use bevy::{
     ecs::component::{ComponentId, Mutable},
@@ -122,11 +122,28 @@ impl DeferredChanges {
 }
 
 /// Buffered insertions stored in type-erased way.
+///
+/// Each buffered component is dropped exactly once: moved into the entity by [`Self::apply`],
+/// or dropped in place by [`Self::clear`] or on drop.
 #[derive(Default)]
 pub(crate) struct DeferredInsertions {
     ids: Vec<ComponentId>,
-    offsets: Vec<usize>,
+    components: Vec<BufferedComponent>,
     data: AlignedBuffer,
+}
+
+/// Where a buffered component sits in [`AlignedBuffer`], and how to drop it there.
+struct BufferedComponent {
+    offset: usize,
+    drop: unsafe fn(NonNull<u8>),
+}
+
+/// # Safety
+///
+/// `ptr` should point to a valid `C` that is never used again.
+unsafe fn drop_buffered<C>(ptr: NonNull<u8>) {
+    // SAFETY: the caller guarantees that the pointer holds a `C` nothing else will use.
+    unsafe { ptr.cast::<C>().drop_in_place() }
 }
 
 impl DeferredInsertions {
@@ -139,7 +156,10 @@ impl DeferredInsertions {
     unsafe fn insert<C: Component>(&mut self, component: C, component_id: ComponentId) {
         let offset = self.data.reserve(Layout::new::<C>());
         self.ids.push(component_id);
-        self.offsets.push(offset);
+        self.components.push(BufferedComponent {
+            offset,
+            drop: drop_buffered::<C>,
+        });
 
         // SAFETY: the reserved space is allocated and aligned for `C`.
         unsafe { self.data.at(offset).cast::<C>().write(component) };
@@ -165,18 +185,26 @@ impl DeferredInsertions {
         };
 
         // SAFETY: the data at this offset was written as `C`, the type of its ID.
-        unsafe { self.data.at(self.offsets[index]).cast::<C>().as_mut() }
+        unsafe {
+            self.data
+                .at(self.components[index].offset)
+                .cast::<C>()
+                .as_mut()
+        }
     }
 
     fn apply(&mut self, entity: &mut EntityWorldMut) {
+        // Taken before moving, so a panic while inserting leaks the components instead of dropping them twice.
+        let mut components = mem::take(&mut self.components);
         // SAFETY: iterator produces valid pointers for each component ID.
         unsafe {
-            let iter = self
-                .offsets
+            let iter = components
                 .iter()
-                .map(|&offset| PtrMut::new(self.data.at(offset)).promote());
+                .map(|component| PtrMut::new(self.data.at(component.offset)).promote());
             entity.insert_by_ids(&self.ids, iter);
         }
+        components.clear();
+        self.components = components;
     }
 
     fn is_empty(&self) -> bool {
@@ -185,8 +213,17 @@ impl DeferredInsertions {
 
     fn clear(&mut self) {
         self.ids.clear();
-        self.offsets.clear();
+        for component in self.components.drain(..) {
+            // SAFETY: the component wasn't applied, and draining forgets it.
+            unsafe { (component.drop)(self.data.at(component.offset)) };
+        }
         self.data.clear();
+    }
+}
+
+impl Drop for DeferredInsertions {
+    fn drop(&mut self) {
+        self.clear();
     }
 }
 
@@ -413,6 +450,74 @@ mod tests {
         assert_eq!(*second.get::<Align4096>().unwrap(), Align4096(3));
     }
 
+    #[test]
+    fn cleared_insertions_drop_once() {
+        let counted = Arc::new(());
+        let mut world = World::new();
+        let mut changes = DeferredChanges::default();
+        let mut entity = DeferredEntity::new(world.spawn_empty(), &mut changes);
+        entity.insert(Counted(counted.clone()));
+        entity.get_mut_or_insert_with(|| Counted(counted.clone()));
+        entity
+            .get_mut_or_insert_with(|| WithVec(Vec::new()))
+            .0
+            .push(1);
+        assert_eq!(Arc::strong_count(&counted), 2);
+
+        let mut next = DeferredEntity::new(world.spawn_empty(), &mut changes);
+        assert_eq!(
+            Arc::strong_count(&counted),
+            1,
+            "an unflushed insertion should drop when the buffer is reused"
+        );
+
+        next.flush();
+        assert!(!next.contains::<Counted>());
+        assert!(!next.contains::<WithVec>());
+        assert_eq!(Arc::strong_count(&counted), 1);
+    }
+
+    #[test]
+    fn dropped_insertions_drop_once() {
+        let counted = Arc::new(());
+        let mut world = World::new();
+        let mut changes = DeferredChanges::default();
+        DeferredEntity::new(world.spawn_empty(), &mut changes)
+            .insert(Counted(counted.clone()))
+            .insert(Trivial(1));
+        assert_eq!(Arc::strong_count(&counted), 2);
+
+        drop(changes);
+        assert_eq!(
+            Arc::strong_count(&counted),
+            1,
+            "an unflushed insertion should drop with the buffer"
+        );
+    }
+
+    #[test]
+    fn flushed_insertions_move_into_entity() {
+        let counted = Arc::new(());
+        let mut world = World::new();
+        let mut changes = DeferredChanges::default();
+        let mut entity = DeferredEntity::new(world.spawn_empty(), &mut changes);
+        entity.insert(Counted(counted.clone()));
+        entity.flush();
+        let id = entity.id();
+        assert_eq!(Arc::strong_count(&counted), 2);
+
+        DeferredEntity::new(world.spawn_empty(), &mut changes).flush();
+        drop(changes);
+        assert_eq!(
+            Arc::strong_count(&counted),
+            2,
+            "a flushed insertion belongs to the entity"
+        );
+
+        world.despawn(id);
+        assert_eq!(Arc::strong_count(&counted), 1);
+    }
+
     fn is_aligned<C>(component: &mut C) -> bool {
         (component as *mut C).is_aligned()
     }
@@ -437,6 +542,9 @@ mod tests {
 
     #[derive(Component)]
     struct Unit;
+
+    #[derive(Component)]
+    struct Counted(#[expect(dead_code, reason = "held for its strong count")] Arc<()>);
 
     #[derive(Component, Deref)]
     struct Trivial(usize);
