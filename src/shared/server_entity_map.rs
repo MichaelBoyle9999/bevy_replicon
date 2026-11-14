@@ -11,10 +11,15 @@ use log::{error, warn};
 ///
 /// Automatically updated on replication receive. If the client predicts a despawn,
 /// the mapping is kept until the server also despawns the entity.
+///
+/// If the despawn function keeps the client entity, such as to keep it for rollback,
+/// mutations from the server for ticks before the despawn still apply to it until
+/// the client entity is despawned, even when they arrive after the despawn.
 #[derive(Resource, Default)]
 pub struct ServerEntityMap {
     server_to_client: EntityHashMap<Entity>,
     client_to_server: EntityHashMap<Entity>,
+    departed: EntityHashMap<Entity>,
 }
 
 impl ServerEntityMap {
@@ -54,10 +59,32 @@ impl ServerEntityMap {
         )
     }
 
+    /// Keeps a despawned server entity's client entity, which its despawn function kept,
+    /// reachable through [`Self::to_client_for_mutations`].
+    pub(crate) fn insert_departed(&mut self, server_entity: Entity, client_entity: Entity) {
+        self.departed.insert(server_entity, client_entity);
+    }
+
+    /// Releases each departed client entity that `is_kept` no longer holds.
+    pub(crate) fn release_departed(&mut self, mut is_kept: impl FnMut(Entity) -> bool) {
+        self.departed
+            .retain(|_, &mut client_entity| is_kept(client_entity));
+    }
+
+    /// Returns the client entity that mutations for `server_entity` apply to,
+    /// including one whose server entity was despawned but whose client entity was kept.
+    pub(crate) fn to_client_for_mutations(&self, server_entity: Entity) -> Option<Entity> {
+        self.server_to_client
+            .get(&server_entity)
+            .or_else(|| self.departed.get(&server_entity))
+            .copied()
+    }
+
     /// Clears the map.
     pub(crate) fn clear(&mut self) {
         self.client_to_server.clear();
         self.server_to_client.clear();
+        self.departed.clear();
     }
 }
 

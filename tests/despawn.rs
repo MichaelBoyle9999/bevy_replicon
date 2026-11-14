@@ -2,6 +2,7 @@ use bevy::{prelude::*, state::app::StatesPlugin};
 use bevy_replicon::{
     prelude::*,
     shared::{
+        backend::channels::ServerChannel,
         replication::registry::{ReplicationRegistry, ctx::DespawnCtx},
         server_entity_map::ServerEntityMap,
     },
@@ -107,6 +108,83 @@ fn mutation_received_with_the_despawn() {
     let entity_map = client_app.world().resource::<ServerEntityMap>();
     assert!(entity_map.to_client().is_empty());
     assert!(entity_map.to_server().is_empty());
+}
+
+#[test]
+fn mutation_received_after_the_despawn() {
+    let mut server_app = App::new();
+    let mut client_app = App::new();
+    for app in [&mut server_app, &mut client_app] {
+        app.add_plugins((
+            MinimalPlugins,
+            StatesPlugin,
+            RepliconPlugins.set(ServerPlugin::new(PostUpdate)),
+        ))
+        .replicate::<CounterComponent>()
+        .finish();
+    }
+    client_app
+        .world_mut()
+        .resource_mut::<ReplicationRegistry>()
+        .despawn = mark_despawned;
+
+    server_app.connect_client(&mut client_app);
+
+    let server_entity = server_app
+        .world_mut()
+        .spawn((Replicated, CounterComponent(0)))
+        .id();
+
+    server_app.update();
+    server_app.exchange_with_client(&mut client_app);
+    client_app.update();
+    server_app.exchange_with_client(&mut client_app);
+
+    server_app
+        .world_mut()
+        .get_mut::<CounterComponent>(server_entity)
+        .unwrap()
+        .0 = 1;
+    server_app.update();
+    server_app.world_mut().despawn(server_entity);
+    server_app.update();
+
+    let mut mutations = Vec::new();
+    let mut client_messages = client_app.world_mut().resource_mut::<ClientMessages>();
+    for (_, channel_id, message) in server_app
+        .world_mut()
+        .resource_mut::<ServerMessages>()
+        .drain_sent()
+    {
+        if channel_id == usize::from(ServerChannel::Mutations) {
+            mutations.push(message);
+        } else {
+            client_messages.insert_received(channel_id, message);
+        }
+    }
+    client_app.update();
+
+    let mut counter = client_app
+        .world_mut()
+        .query_filtered::<&CounterComponent, With<Despawned>>();
+    assert_eq!(
+        counter.single(client_app.world()).unwrap().0,
+        0,
+        "the despawn must arrive before the mutation sent ahead of it"
+    );
+
+    let mut client_messages = client_app.world_mut().resource_mut::<ClientMessages>();
+    for message in mutations {
+        client_messages.insert_received(ServerChannel::Mutations, message);
+    }
+    client_app.update();
+
+    assert_eq!(
+        counter.single(client_app.world()).unwrap().0,
+        1,
+        "a mutation sent before the despawn must apply to the kept entity even when it arrives \
+         after the despawn"
+    );
 }
 
 #[test]

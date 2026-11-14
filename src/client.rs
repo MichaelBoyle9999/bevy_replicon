@@ -4,7 +4,7 @@ pub mod diagnostics;
 pub mod message;
 pub mod server_mutate_ticks;
 
-use bevy::{ecs::entity::hash_map::EntityHashMap, prelude::*};
+use bevy::prelude::*;
 use bytes::{Buf, Bytes};
 use log::{Level, debug, error, log_enabled, trace};
 use postcard::experimental::max_size::MaxSize;
@@ -129,7 +129,6 @@ pub(super) fn receive_replication(
     world: &mut World,
     mut changes: Local<DeferredChanges>,
     mut entity_markers: Local<EntityMarkers>,
-    mut despawned: Local<EntityHashMap<Entity>>,
 ) {
     world.resource_scope(|world, mut messages: Mut<ClientMessages>| {
         world.resource_scope(|world, mut entity_map: Mut<ServerEntityMap>| {
@@ -148,7 +147,6 @@ pub(super) fn receive_replication(
                                         changes: &mut changes,
                                         entity_markers: &mut entity_markers,
                                         entity_map: &mut entity_map,
-                                        despawned: &mut despawned,
                                         signature_map: &mut signature_map,
                                         replicated: &mut replicated,
                                         mutate_ticks: mutate_ticks.as_mut(),
@@ -223,6 +221,10 @@ fn apply_replication(
     messages: &mut ClientMessages,
     buffered_mutations: &mut BufferedMutations,
 ) {
+    params
+        .entity_map
+        .release_departed(|client_entity| world.get_entity(client_entity).is_ok());
+
     for mut message in messages.receive(ServerChannel::Updates) {
         if let Err(e) = apply_update_message(world, params, &mut message) {
             error!("unable to apply update message: {e}");
@@ -248,8 +250,6 @@ fn apply_replication(
     }
 
     apply_mutate_messages(world, params, buffered_mutations, update_tick);
-
-    params.despawned.clear();
 }
 
 /// Reads and applies an update message.
@@ -446,12 +446,16 @@ fn apply_despawn(
         // The entity can also be despawned via a relationship when applying
         // despawn to another entity, so we always need to remove it from the map.
         params.signature_map.remove(client_entity);
-        // Mutations received with this despawn can be for ticks before it.
-        params.despawned.insert(server_entity, client_entity);
-        if let Ok(client_entity) = world.get_entity_mut(client_entity) {
-            trace!("applying despawn for `{}`", client_entity.id());
+        if let Ok(entity) = world.get_entity_mut(client_entity) {
+            trace!("applying despawn for `{client_entity}`");
             let ctx = DespawnCtx { message_tick };
-            (params.registry.despawn)(&ctx, client_entity);
+            (params.registry.despawn)(&ctx, entity);
+        }
+        if world.get_entity(client_entity).is_ok() {
+            // Mutations for ticks before the despawn can arrive after it.
+            params
+                .entity_map
+                .insert_departed(server_entity, client_entity);
         }
     }
 
@@ -682,13 +686,8 @@ fn apply_mutations(
     let server_entity = postcard_utils::entity_from_buf(message)?;
     let data_size: usize = postcard_utils::from_buf(message)?;
 
-    let Some(&client_entity) = params
-        .entity_map
-        .to_client()
-        .get(&server_entity)
-        .or_else(|| params.despawned.get(&server_entity))
-    else {
-        // Mutation could arrive after a despawn from an earlier receive.
+    let Some(client_entity) = params.entity_map.to_client_for_mutations(server_entity) else {
+        // Mutation could arrive after a despawn that freed the client entity.
         debug!("ignoring mutations received for unknown server's `{server_entity}`");
         message.advance(data_size);
         return Ok(());
@@ -797,7 +796,6 @@ struct ReceiveParams<'a> {
     changes: &'a mut DeferredChanges,
     entity_markers: &'a mut EntityMarkers,
     entity_map: &'a mut ServerEntityMap,
-    despawned: &'a mut EntityHashMap<Entity>,
     signature_map: &'a mut SignatureMap,
     replicated: &'a mut Messages<EntityReplicated>,
     mutate_ticks: Option<&'a mut ServerMutateTicks>,
