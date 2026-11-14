@@ -25,6 +25,7 @@ pub struct ServerEntityMap {
 impl ServerEntityMap {
     /// Inserts a server-client pair into the map.
     pub(crate) fn insert(&mut self, server_entity: Entity, client_entity: Entity) {
+        self.departed.remove(&server_entity);
         if let Some(existing_entity) = self.server_to_client.insert(server_entity, client_entity) {
             if client_entity != existing_entity {
                 error!(
