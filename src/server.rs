@@ -16,11 +16,10 @@ use bevy::{
         archetype::Archetypes,
         change_detection::{CheckChangeTicks, ComponentTicks, Tick},
         component::ComponentId,
-        entity::{Entities, EntityHash, EntityHashMap, EntityHashSet},
+        entity::{Entities, EntityHash, EntityHashMap},
         intern::Interned,
         schedule::ScheduleLabel,
         system::SystemChangeTick,
-        world::DeferredWorld,
     },
     platform::collections::{HashSet, hash_map::Entry},
     prelude::*,
@@ -37,7 +36,7 @@ use crate::{
         replicated_archetypes::ReplicatedArchetypes,
         replication_messages::{
             mutations::MutationsSplit,
-            serialized_data::{EntityDespawn, EntityMapping, MessageWrite, WritableComponent},
+            serialized_data::{EntityMapping, MessageWrite, WritableComponent},
         },
         visibility::registry::FilterRegistry,
     },
@@ -166,7 +165,6 @@ impl Plugin for ServerPlugin {
                     prepare_messages,
                     collect_mappings,
                     collect_despawns,
-                    collect_visibility_losses,
                     collect_removals,
                     collect_changes,
                     send_messages,
@@ -326,17 +324,14 @@ fn buffer_removals(
     removals.insert(remove.entity, components, archetype, &registry);
 }
 
-fn buffer_despawn(remove: On<Remove, Replicated>, mut world: DeferredWorld) {
-    if *world.resource::<State<ServerState>>() == ServerState::Running {
+fn buffer_despawn(
+    remove: On<Remove, Replicated>,
+    mut despawn_buffer: ResMut<DespawnBuffer>,
+    state: Res<State<ServerState>>,
+) {
+    if *state == ServerState::Running {
         trace!("buffering despawn of `{}`", remove.entity);
-        let despawn_tick = world
-            .get_resource::<ReplicationRegistry>()
-            .expect("registry should always exist on the server")
-            .despawn_tick;
-        let tick = despawn_tick(world.entity(remove.entity));
-        world
-            .resource_mut::<DespawnBuffer>()
-            .push((remove.entity, tick));
+        despawn_buffer.push(remove.entity);
     }
 }
 
@@ -451,11 +446,7 @@ fn should_send_mapping(
 ) -> bool {
     // Since despawns processed later, we need to explicitly check for them here
     // because we can't distinguish between a despawn and removal of a visibility filter.
-    if visibility.get(entity).is_hidden(registry)
-        || despawn_buffer
-            .iter()
-            .any(|&(despawned, _)| despawned == entity)
-    {
+    if visibility.get(entity).is_hidden(registry) || despawn_buffer.contains(&entity) {
         return false;
     }
 
@@ -465,6 +456,7 @@ fn should_send_mapping(
 
 /// Collect entity despawns from this tick into update messages.
 fn collect_despawns(
+    registry: Res<FilterRegistry>,
     mut serialized: ResMut<SerializedData>,
     mut pools: ResMut<ClientPools>,
     mut despawn_buffer: ResMut<DespawnBuffer>,
@@ -477,9 +469,9 @@ fn collect_despawns(
         &mut ClientVisibility,
     )>,
 ) -> Result<()> {
-    for (entity, tick) in despawn_buffer.drain(..) {
+    for entity in despawn_buffer.drain(..) {
         removal_buffer.discard(entity);
-        let entity_range = EntityDespawn { entity, tick }.write(&mut serialized)?;
+        let entity_range = entity.write(&mut serialized)?;
         for (client, mut message, mut ticks, mut priority, mut visibility) in &mut clients {
             if let Some(entity_ticks) = ticks.entities.remove(&entity) {
                 // Write despawn only if the entity was previously sent because
@@ -493,59 +485,17 @@ fn collect_despawns(
         }
     }
 
-    Ok(())
-}
+    for (client, mut message, mut ticks, mut priority, visibility) in clients {
+        for (entity, filter_mask) in visibility.iter_lost() {
+            // Skip visibility changes that hide only components.
+            if !filter_mask.is_hidden(&registry) {
+                continue;
+            }
 
-/// Collects entities that lost visibility for a client during this tick into update messages
-/// as despawns, each with the tick from [`ReplicationRegistry::despawn_tick`].
-fn collect_visibility_losses(
-    registry: Res<FilterRegistry>,
-    mut world_and_messages: ParamSet<(
-        &World,
-        (
-            ResMut<SerializedData>,
-            ResMut<ClientPools>,
-            Query<(
-                Entity,
-                &mut Updates,
-                &mut ClientTicks,
-                &mut PriorityMap,
-                &ClientVisibility,
-            )>,
-        ),
-    )>,
-) -> Result<()> {
-    let sent_lost: EntityHashSet = {
-        let (_, _, clients) = world_and_messages.p1();
-        clients
-            .iter()
-            .flat_map(|(_, _, ticks, _, visibility)| {
-                entities_losing_visibility(visibility, &registry)
-                    .filter(|entity| ticks.entities.contains_key(entity))
-            })
-            .collect()
-    };
-
-    let world = world_and_messages.p0();
-    let despawn_tick = world.resource::<ReplicationRegistry>().despawn_tick;
-    let despawns: Vec<EntityDespawn> = sent_lost
-        .into_iter()
-        .map(|entity| EntityDespawn {
-            entity,
-            tick: despawn_tick(world.entity(entity)),
-        })
-        .collect();
-
-    let (mut serialized, mut pools, mut clients) = world_and_messages.p1();
-    let mut despawn_ranges = EntityHashMap::default();
-    for despawn in despawns {
-        despawn_ranges.insert(despawn.entity, despawn.write(&mut serialized)?);
-    }
-    for (client, mut message, mut ticks, mut priority, visibility) in &mut clients {
-        for entity in entities_losing_visibility(visibility, &registry) {
             if let Some(entity_ticks) = ticks.entities.remove(&entity) {
                 trace!("writing visibility lost for `{entity}` for client `{client}`");
-                message.add_despawn(despawn_ranges[&entity].clone());
+                let entity_range = entity.write(&mut serialized)?;
+                message.add_despawn(entity_range);
                 pools.recycle_components(entity_ticks.components);
             }
             priority.remove(&entity);
@@ -553,17 +503,6 @@ fn collect_visibility_losses(
     }
 
     Ok(())
-}
-
-/// Entities that lose visibility as a whole during this tick, skipping changes that hide only components.
-fn entities_losing_visibility<'a>(
-    visibility: &'a ClientVisibility,
-    registry: &'a FilterRegistry,
-) -> impl Iterator<Item = Entity> + 'a {
-    visibility
-        .iter_lost()
-        .filter(|(_, filter_mask)| filter_mask.is_hidden(registry))
-        .map(|(entity, _)| entity)
 }
 
 /// Collects component removals into update messages.
@@ -1206,7 +1145,7 @@ struct ServerChangeTick(Tick);
 /// to avoid missing events in case the server's tick policy is
 /// not [`TickPolicy::EveryFrame`].
 #[derive(Resource, Deref, DerefMut, Default)]
-struct DespawnBuffer(Vec<(Entity, Option<RepliconTick>)>);
+struct DespawnBuffer(Vec<Entity>);
 
 /// Marker that enables replication and all events for a client.
 ///
