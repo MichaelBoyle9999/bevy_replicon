@@ -89,6 +89,12 @@ impl Plugin for ServerMessagePlugin {
             .build_state(app.world_mut())
             .build_system(send_locally);
 
+        let replication_schedule = app
+            .get_added_plugins::<ServerPlugin>()
+            .first()
+            .expect("server messages require the server plugin")
+            .replication_schedule;
+
         app.insert_resource(registry)
             .add_systems(
                 PreUpdate,
@@ -102,14 +108,22 @@ impl Plugin for ServerMessagePlugin {
             .add_systems(
                 PostUpdate,
                 (
-                    send_or_buffer_fn.run_if(in_state(ServerState::Running)),
-                    send_buffered
+                    send_or_buffer_fn
                         .run_if(in_state(ServerState::Running))
-                        .run_if(resource_changed::<ServerTick>),
+                        .in_set(BufferMessages),
                     send_locally_fn.run_if(in_state(ClientState::Disconnected)),
                 )
                     .chain()
                     .after(super::send_messages)
+                    .in_set(ServerSystems::Send),
+            )
+            .add_systems(
+                replication_schedule,
+                send_buffered
+                    .after(super::send_messages)
+                    .after(BufferMessages)
+                    .run_if(in_state(ServerState::Running))
+                    .run_if(resource_changed::<ServerTick>)
                     .in_set(ServerSystems::Send),
             );
     }
@@ -145,6 +159,9 @@ fn send_or_buffer(
         }
     }
 }
+
+#[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone, Copy)]
+struct BufferMessages;
 
 fn send_buffered(
     mut messages: ResMut<ServerMessages>,
