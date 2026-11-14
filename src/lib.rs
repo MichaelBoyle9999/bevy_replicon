@@ -123,6 +123,10 @@ app.insert_resource(Time::from_hz(30.0)) // Run 30 times per second.
 
 You can also configure the schedule via [`ServerPlugin::tick_schedule`].
 
+By default, replication runs once per frame in [`PostUpdate`], so a frame that advances
+[`ServerTick`](server::server_tick::ServerTick) several times sends only the last tick. To send
+every tick, set [`ServerPlugin::replication_schedule`] to the schedule that increments it.
+
 ### Entities
 
 By default no entities are replicated. Add the [`Replicated`] marker

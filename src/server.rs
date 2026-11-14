@@ -92,6 +92,15 @@ pub struct ServerPlugin {
     /// ```
     pub tick_schedule: Option<Interned<dyn ScheduleLabel>>,
 
+    /// Schedule in which replication runs, in [`ServerSystems::Send`], if [`ServerTick`] changed.
+    ///
+    /// By default it's set to [`PostUpdate`], which replicates once per frame, sending only
+    /// the last [`ServerTick`] reached in that frame. Set it to the schedule that increments
+    /// [`ServerTick`], such as [`FixedPostUpdate`], to replicate every tick: a frame that
+    /// advances several ticks then sends each of them, stamped with its own tick.
+    /// Packets are still sent in [`PostUpdate`], in [`ServerSystems::SendPackets`].
+    pub replication_schedule: Interned<dyn ScheduleLabel>,
+
     /// The time after which mutations will be considered lost if an acknowledgment is not received for them.
     ///
     /// In practice mutations will live at least `mutations_timeout`, and at most `2*mutations_timeout`.
@@ -103,6 +112,7 @@ impl ServerPlugin {
     pub fn new(tick_schedule: impl ScheduleLabel) -> Self {
         Self {
             tick_schedule: Some(tick_schedule.intern()),
+            replication_schedule: PostUpdate.intern(),
             mutations_timeout: Duration::from_secs(10),
         }
     }
@@ -136,6 +146,10 @@ impl Plugin for ServerPlugin {
                 (ServerSystems::ReceivePackets, ServerSystems::Receive).chain(),
             )
             .configure_sets(
+                self.replication_schedule,
+                (ServerSystems::IncrementTick, ServerSystems::Send).chain(),
+            )
+            .configure_sets(
                 PostUpdate,
                 (
                     ServerSystems::IncrementTick,
@@ -160,7 +174,7 @@ impl Plugin for ServerPlugin {
             )
             .add_systems(OnExit(ServerState::Running), reset)
             .add_systems(
-                PostUpdate,
+                self.replication_schedule,
                 (
                     prepare_messages,
                     collect_mappings,
@@ -1123,7 +1137,8 @@ pub enum ServerSystems {
     IncrementTick,
     /// Systems that write data to [`ServerMessages`].
     ///
-    /// Runs in [`PostUpdate`] if [`ServerTick`] changes.
+    /// Replication runs in [`ServerPlugin::replication_schedule`] if [`ServerTick`] changes,
+    /// and network messages in [`PostUpdate`].
     Send,
     /// Systems that send packets to the messaging backend.
     ///
