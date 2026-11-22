@@ -16,7 +16,9 @@
 //! at that tick yet). Replicon stays agnostic to *where* the confirmed value
 //! lives; a rollback/history crate installs the lookup. Serializing the live
 //! value is the degenerate case where `history[ServerTick] == live`, so an app
-//! that never installs a source is byte-for-byte unchanged.
+//! that never installs a source is byte-for-byte unchanged. Its
+//! [`ConfirmedPresentFn`] likewise decides from which tick an entity exists for
+//! clients that haven't received it.
 
 use bevy::{
     ecs::{component::ComponentId, world::unsafe_world_cell::UnsafeWorldCell},
@@ -124,6 +126,9 @@ pub type ConfirmedChangedFn =
 /// [`ServerTick`](super::server_tick::ServerTick) at which it is present, so it
 /// reaches the client in the update dated at its arrival, with that tick's
 /// confirmed values. Asked only for entities a client hasn't received.
+///
+/// Server messages naming the entity are not withheld: their senders check its
+/// presence themselves, or a client can't map the entity they name.
 ///
 /// # Safety
 ///
