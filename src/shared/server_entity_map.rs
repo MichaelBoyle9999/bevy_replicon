@@ -58,6 +58,7 @@ impl ServerEntityMap {
         EntityEntry::new(
             self.server_to_client.entry(server_entity),
             &mut self.client_to_server,
+            &mut self.departed,
         )
     }
 
@@ -89,8 +90,8 @@ impl ServerEntityMap {
         server_entity: Entity,
         spawn: impl FnOnce() -> Entity,
     ) -> Entity {
-        match self.departed.get(&server_entity) {
-            Some(&kept) => kept,
+        match self.client_entity(server_entity) {
+            Some(client_entity) => client_entity,
             None => self.server_entry(server_entity).or_insert_with(spawn),
         }
     }
@@ -114,6 +115,7 @@ impl<'a> EntityEntry<'a> {
     fn new(
         main_entry: Entry<'a, Entity, Entity, EntityHash>,
         reverse_map: &'a mut EntityHashMap<Entity>,
+        departed: &'a mut EntityHashMap<Entity>,
     ) -> Self {
         match main_entry {
             Entry::Occupied(main_entry) => Self::Occupied(OccupiedEntityEntry {
@@ -123,6 +125,7 @@ impl<'a> EntityEntry<'a> {
             Entry::Vacant(main_entry) => Self::Vacant(VacantEntityEntry {
                 main_entry,
                 reverse_map,
+                departed,
             }),
         }
     }
@@ -180,12 +183,14 @@ impl OccupiedEntityEntry<'_> {
 pub struct VacantEntityEntry<'a> {
     main_entry: hash_map::VacantEntry<'a, Entity, Entity, EntityHash>,
     reverse_map: &'a mut EntityHashMap<Entity>,
+    departed: &'a mut EntityHashMap<Entity>,
 }
 
 impl VacantEntityEntry<'_> {
-    /// Sets the mapped entity for the entry and returns it.
+    /// Sets the mapped entity for the entry, replacing any departed one, and returns it.
     pub fn insert(self, value: Entity) -> Entity {
         let key = *self.main_entry.key();
+        self.departed.remove(&key);
         self.main_entry.insert(value);
         self.reverse_map.insert(value, key);
         value

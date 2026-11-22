@@ -284,6 +284,83 @@ fn references_received_after_the_despawn_map_to_the_kept_entity() {
 }
 
 #[test]
+fn references_to_a_regained_entity_map_to_its_new_client_entity() {
+    let mut server_app = App::new();
+    let mut client_app = App::new();
+    for app in [&mut server_app, &mut client_app] {
+        app.add_plugins((
+            MinimalPlugins,
+            StatesPlugin,
+            RepliconPlugins.set(ServerPlugin::new(PostUpdate)),
+        ))
+        .replicate::<MappedComponent>()
+        .add_visibility_filter::<EntityVisibility>()
+        .finish();
+    }
+    client_app
+        .world_mut()
+        .resource_mut::<ReplicationRegistry>()
+        .despawn = mark_despawned;
+
+    server_app.connect_client(&mut client_app);
+    let client = **client_app.world().resource::<TestClientEntity>();
+    let exchange = |server_app: &mut App, client_app: &mut App| {
+        server_app.update();
+        server_app.exchange_with_client(client_app);
+        client_app.update();
+        server_app.exchange_with_client(client_app);
+    };
+
+    server_app
+        .world_mut()
+        .entity_mut(client)
+        .insert(EntityVisibility);
+    let regained = server_app
+        .world_mut()
+        .spawn((Replicated, EntityVisibility))
+        .id();
+    let referrer = server_app
+        .world_mut()
+        .spawn((Replicated, MappedComponent(Entity::PLACEHOLDER)))
+        .id();
+    exchange(&mut server_app, &mut client_app);
+    server_app
+        .world_mut()
+        .entity_mut(client)
+        .remove::<EntityVisibility>();
+    exchange(&mut server_app, &mut client_app);
+    server_app
+        .world_mut()
+        .entity_mut(client)
+        .insert(EntityVisibility);
+    exchange(&mut server_app, &mut client_app);
+
+    server_app
+        .world_mut()
+        .get_mut::<MappedComponent>(referrer)
+        .unwrap()
+        .0 = regained;
+    exchange(&mut server_app, &mut client_app);
+
+    let current = client_app
+        .world_mut()
+        .query_filtered::<Entity, (With<Remote>, Without<Despawned>, Without<MappedComponent>)>()
+        .single(client_app.world())
+        .expect("the regained entity must reach the client again");
+    let reference = client_app
+        .world_mut()
+        .query::<&MappedComponent>()
+        .single(client_app.world())
+        .unwrap()
+        .0;
+    assert_eq!(
+        reference, current,
+        "a reference to an entity that regained visibility must name its new client entity, \
+         not the one its visibility loss kept"
+    );
+}
+
+#[test]
 fn with_relations() {
     let mut server_app = App::new();
     let mut client_app = App::new();
