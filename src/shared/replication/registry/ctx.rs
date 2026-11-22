@@ -71,8 +71,6 @@ pub struct DespawnCtx {
 
     /// Tick the server attached to this despawn with
     /// [`ReplicationRegistry::despawn_tick`](super::ReplicationRegistry::despawn_tick).
-    ///
-    /// Always [`None`] for an entity despawned because it lost visibility.
     pub despawn_tick: Option<RepliconTick>,
 }
 

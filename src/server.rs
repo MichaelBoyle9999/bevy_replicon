@@ -16,7 +16,7 @@ use bevy::{
         archetype::Archetypes,
         change_detection::{CheckChangeTicks, ComponentTicks, Tick},
         component::ComponentId,
-        entity::{Entities, EntityHash, EntityHashMap},
+        entity::{Entities, EntityHash, EntityHashMap, EntityHashSet},
         intern::Interned,
         schedule::ScheduleLabel,
         system::SystemChangeTick,
@@ -166,6 +166,7 @@ impl Plugin for ServerPlugin {
                     prepare_messages,
                     collect_mappings,
                     collect_despawns,
+                    collect_visibility_losses,
                     collect_removals,
                     collect_changes,
                     send_messages,
@@ -464,7 +465,6 @@ fn should_send_mapping(
 
 /// Collect entity despawns from this tick into update messages.
 fn collect_despawns(
-    registry: Res<FilterRegistry>,
     mut serialized: ResMut<SerializedData>,
     mut pools: ResMut<ClientPools>,
     mut despawn_buffer: ResMut<DespawnBuffer>,
@@ -493,17 +493,59 @@ fn collect_despawns(
         }
     }
 
-    for (client, mut message, mut ticks, mut priority, visibility) in clients {
-        for (entity, filter_mask) in visibility.iter_lost() {
-            // Skip visibility changes that hide only components.
-            if !filter_mask.is_hidden(&registry) {
-                continue;
-            }
+    Ok(())
+}
 
+/// Collects entities that lost visibility for a client during this tick into update messages
+/// as despawns, each with the tick from [`ReplicationRegistry::despawn_tick`].
+fn collect_visibility_losses(
+    registry: Res<FilterRegistry>,
+    mut world_and_messages: ParamSet<(
+        &World,
+        (
+            ResMut<SerializedData>,
+            ResMut<ClientPools>,
+            Query<(
+                Entity,
+                &mut Updates,
+                &mut ClientTicks,
+                &mut PriorityMap,
+                &ClientVisibility,
+            )>,
+        ),
+    )>,
+) -> Result<()> {
+    let sent_lost: EntityHashSet = {
+        let (_, _, clients) = world_and_messages.p1();
+        clients
+            .iter()
+            .flat_map(|(_, _, ticks, _, visibility)| {
+                entities_losing_visibility(visibility, &registry)
+                    .filter(|entity| ticks.entities.contains_key(entity))
+            })
+            .collect()
+    };
+
+    let world = world_and_messages.p0();
+    let despawn_tick = world.resource::<ReplicationRegistry>().despawn_tick;
+    let despawns: Vec<EntityDespawn> = sent_lost
+        .into_iter()
+        .map(|entity| EntityDespawn {
+            entity,
+            tick: despawn_tick(world.entity(entity)),
+        })
+        .collect();
+
+    let (mut serialized, mut pools, mut clients) = world_and_messages.p1();
+    let mut despawn_ranges = EntityHashMap::default();
+    for despawn in despawns {
+        despawn_ranges.insert(despawn.entity, despawn.write(&mut serialized)?);
+    }
+    for (client, mut message, mut ticks, mut priority, visibility) in &mut clients {
+        for entity in entities_losing_visibility(visibility, &registry) {
             if let Some(entity_ticks) = ticks.entities.remove(&entity) {
                 trace!("writing visibility lost for `{entity}` for client `{client}`");
-                let entity_range = EntityDespawn { entity, tick: None }.write(&mut serialized)?;
-                message.add_despawn(entity_range);
+                message.add_despawn(despawn_ranges[&entity].clone());
                 pools.recycle_components(entity_ticks.components);
             }
             priority.remove(&entity);
@@ -511,6 +553,17 @@ fn collect_despawns(
     }
 
     Ok(())
+}
+
+/// Entities that lose visibility as a whole during this tick, skipping changes that hide only components.
+fn entities_losing_visibility<'a>(
+    visibility: &'a ClientVisibility,
+    registry: &'a FilterRegistry,
+) -> impl Iterator<Item = Entity> + 'a {
+    visibility
+        .iter_lost()
+        .filter(|(_, filter_mask)| filter_mask.is_hidden(registry))
+        .map(|(entity, _)| entity)
 }
 
 /// Collects component removals into update messages.

@@ -26,8 +26,8 @@ pub struct ReplicationRegistry {
     /// Useful if you need to intercept despawns and handle them in a special way.
     pub despawn: DespawnFn,
 
-    /// Server function reading the tick to attach to an entity's despawn, while the
-    /// entity still holds its components.
+    /// Server function reading the tick to attach to an entity's despawn, or to its
+    /// loss of visibility for a client, while the entity still holds its components.
     ///
     /// By default uses [`no_despawn_tick`].
     /// The client receives the tick as [`DespawnCtx::despawn_tick`].

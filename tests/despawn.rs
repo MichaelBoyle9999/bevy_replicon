@@ -118,7 +118,7 @@ fn despawn_tick() {
 
 #[test]
 fn despawn_tick_on_visibility_lose() {
-    let (mut server_app, mut client_app, _) = despawn_tick_pair(());
+    let (mut server_app, mut client_app, _) = despawn_tick_pair(CustomDisabled);
 
     let client = **client_app.world().resource::<TestClientEntity>();
     server_app
@@ -129,7 +129,10 @@ fn despawn_tick_on_visibility_lose() {
     server_app.exchange_with_client(&mut client_app);
     client_app.update();
 
-    assert_eq!(received_despawn_ticks(&mut client_app), [None]);
+    assert_eq!(
+        received_despawn_ticks(&mut client_app),
+        [Some(RepliconTick::new(7))]
+    );
 }
 
 #[test]
