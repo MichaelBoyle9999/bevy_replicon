@@ -361,6 +361,60 @@ fn received_entity_stays_with_the_client_whatever_its_presence() {
     assert_eq!(client_value(&mut client_app), Some(V(2)));
 }
 
+#[test]
+fn signature_mapping_reaches_the_client_with_its_entity_at_its_arrival_tick() {
+    let (mut server_app, mut client_app) = confirmed_pair();
+    let arrival = next_send_tick(&server_app) + 1;
+    let client_entity = client_app
+        .world_mut()
+        .spawn((Replicated, Signature::from(0)))
+        .id();
+    server_app
+        .world_mut()
+        .spawn((Replicated, Signature::from(0), ArrivesAt(arrival)));
+
+    exchange(&mut server_app, &mut client_app);
+    assert!(
+        !client_app
+            .world()
+            .entity(client_entity)
+            .contains::<Remote>()
+    );
+    exchange(&mut server_app, &mut client_app);
+
+    assert!(
+        client_app
+            .world()
+            .entity(client_entity)
+            .contains::<Remote>()
+    );
+}
+
+#[test]
+fn signature_entity_despawned_before_its_arrival_never_maps_on_the_client() {
+    let (mut server_app, mut client_app) = confirmed_pair();
+    let arrival = next_send_tick(&server_app) + 1;
+    let client_entity = client_app
+        .world_mut()
+        .spawn((Replicated, Signature::from(0)))
+        .id();
+    let server_entity = server_app
+        .world_mut()
+        .spawn((Replicated, Signature::from(0), ArrivesAt(arrival)))
+        .id();
+
+    exchange(&mut server_app, &mut client_app);
+    server_app.world_mut().despawn(server_entity);
+    exchange(&mut server_app, &mut client_app);
+
+    assert!(
+        !client_app
+            .world()
+            .entity(client_entity)
+            .contains::<Remote>()
+    );
+}
+
 fn client_entity_count(client_app: &mut App) -> usize {
     client_app
         .world_mut()

@@ -119,7 +119,8 @@ pub type ConfirmedChangedFn =
 /// Whether the confirmed history records `entity` as present at `tick`,
 /// reading from the world through the cell.
 ///
-/// An entity is sent to a client that hasn't received it only from the first
+/// An entity, and its [`Signature`](crate::shared::replication::signature::Signature)
+/// mapping, are sent to a client that hasn't received it only from the first
 /// [`ServerTick`](super::server_tick::ServerTick) at which it is present, so it
 /// reaches the client in the update dated at its arrival, with that tick's
 /// confirmed values. Asked only for entities a client hasn't received.

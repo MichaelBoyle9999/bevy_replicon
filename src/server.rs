@@ -9,7 +9,7 @@ mod replication_query;
 pub mod server_tick;
 pub mod visibility;
 
-use core::{mem, time::Duration};
+use core::{cell::OnceCell, mem, time::Duration};
 
 use bevy::{
     ecs::{
@@ -409,6 +409,9 @@ fn prepare_messages(
 
 /// Collects and writes any new entity mappings that happened in this tick.
 fn collect_mappings(
+    query: ReplicationQuery,
+    server_tick: Res<ServerTick>,
+    confirmed_source: Res<ConfirmedReplicationSource>,
     despawn_buffer: Res<DespawnBuffer>,
     registry: Res<FilterRegistry>,
     mut serialized: ResMut<SerializedData>,
@@ -424,12 +427,18 @@ fn collect_mappings(
         let hash = signature.hash();
         let mapping = EntityMapping { entity, hash };
         let mut mapping_range = None;
+        let arrival = OnceCell::new();
+        let arrived = || {
+            *arrival.get_or_init(|| arrived_at(&query, &confirmed_source, entity, **server_tick))
+        };
 
         if let Some(client) = signature.client() {
             let Ok((_, mut message, ticks, visibility)) = clients.get_mut(client) else {
                 continue;
             };
-            if should_send_mapping(entity, &despawn_buffer, &registry, &visibility, &ticks) {
+            if should_send_mapping(entity, &despawn_buffer, &registry, &visibility, &ticks)
+                && arrived()
+            {
                 trace!(
                     "writing mapping `{entity}` to 0x{hash:016x} dedicated for client `{client}`"
                 );
@@ -438,7 +447,9 @@ fn collect_mappings(
             }
         } else {
             for (client, mut message, ticks, visibility) in &mut clients {
-                if should_send_mapping(entity, &despawn_buffer, &registry, &visibility, &ticks) {
+                if should_send_mapping(entity, &despawn_buffer, &registry, &visibility, &ticks)
+                    && arrived()
+                {
                     trace!("writing mapping `{entity}` to 0x{hash:016x} for client `{client}`");
                     let mapping_range =
                         mapping.write_cached(&mut serialized, &mut mapping_range)?;
@@ -792,6 +803,19 @@ fn replicated_value<'w>(
     }
 }
 
+/// Whether `entity` may reach a client that hasn't received it at `tick`.
+fn arrived_at(
+    query: &ReplicationQuery,
+    confirmed_source: &ConfirmedReplicationSource,
+    entity: Entity,
+    tick: RepliconTick,
+) -> bool {
+    // SAFETY: the installed hook obeys the `ConfirmedPresentFn` contract.
+    confirmed_source
+        .fns()
+        .is_none_or(|fns| unsafe { query.confirmed_present(fns.present, entity, tick) })
+}
+
 /// Collects component changes from this tick into update and mutate messages since the last entity tick.
 fn collect_changes(
     archetypes: &Archetypes,
@@ -824,10 +848,12 @@ fn collect_changes(
         let archetype = unsafe { archetypes.get(replicated_archetype.id).unwrap_unchecked() };
 
         for entity in archetype.entities() {
-            // SAFETY: the installed hook obeys the `ConfirmedPresentFn` contract.
-            let present = confirmed_source.fns().is_none_or(|fns| unsafe {
-                query.confirmed_present(fns.present, entity.id(), **server_tick)
-            });
+            let arrival = OnceCell::new();
+            let arrived = || {
+                *arrival.get_or_init(|| {
+                    arrived_at(&query, &confirmed_source, entity.id(), **server_tick)
+                })
+            };
             let mut entity_range = None;
             for (_, mut updates, mut mutations, ..) in &mut clients {
                 updates.start_entity_changes();
@@ -903,7 +929,7 @@ fn collect_changes(
                     }
 
                     let entity_ticks = client_ticks.entities.get(&entity.id());
-                    if entity_ticks.is_none() && !present {
+                    if entity_ticks.is_none() && !arrived() {
                         continue;
                     }
 
@@ -981,7 +1007,7 @@ fn collect_changes(
 
                 let entity_ticks = ticks.entities.entry(entity.id());
                 let new_for_client = matches!(entity_ticks, Entry::Vacant(_));
-                if new_for_client && !present {
+                if new_for_client && !arrived() {
                     continue;
                 }
 
@@ -1150,8 +1176,10 @@ pub enum ServerSystems {
     IncrementTick,
     /// Systems that write data to [`ServerMessages`].
     ///
-    /// Replication runs in [`ServerPlugin::replication_schedule`] if [`ServerTick`] changes,
-    /// and network messages in [`PostUpdate`].
+    /// Replication, and the sending of server messages written before it, run in
+    /// [`ServerPlugin::replication_schedule`] if [`ServerTick`] changes. Server messages
+    /// written after a frame's last replication are buffered in [`PostUpdate`] for the
+    /// next one.
     Send,
     /// Systems that send packets to the messaging backend.
     ///
