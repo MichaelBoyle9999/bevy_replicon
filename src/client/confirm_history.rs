@@ -25,18 +25,34 @@ pub struct ConfirmHistory {
 
     /// The last received server tick for an entity.
     last_tick: RepliconTick,
+
+    /// The earliest received server tick for an entity.
+    first_tick: RepliconTick,
 }
 
 impl Debug for ConfirmHistory {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "ConfirmHistory [{:?} {:b}]", self.last_tick, self.mask)
+        write!(
+            f,
+            "ConfirmHistory [{:?} {:b} since {:?}]",
+            self.last_tick, self.mask, self.first_tick
+        )
     }
 }
 
 impl ConfirmHistory {
     /// Creates a new instance with a single confirmed tick.
     pub fn new(last_tick: RepliconTick) -> Self {
-        Self { mask: 1, last_tick }
+        Self {
+            mask: 1,
+            last_tick,
+            first_tick: last_tick,
+        }
+    }
+
+    /// Returns the earliest received tick for an entity.
+    pub fn first_tick(&self) -> RepliconTick {
+        self.first_tick
     }
 
     /// Returns the last received tick for an entity.
@@ -117,6 +133,7 @@ impl ConfirmHistory {
     pub(super) fn set(&mut self, ago: u32) {
         debug_assert!(ago < u64::BITS);
         self.mask |= 1 << ago;
+        self.first_tick = self.first_tick.min(self.last_tick - ago);
     }
 
     /// Sets the last received tick and shifts the mask.
@@ -244,6 +261,7 @@ mod tests {
         assert!(!history.contains(RepliconTick::new(0)));
         assert!(history.contains(RepliconTick::new(1)));
         assert!(history.contains(RepliconTick::new(2)));
+        assert_eq!(history.first_tick(), RepliconTick::new(1));
     }
 
     #[test]
@@ -255,6 +273,7 @@ mod tests {
         assert!(history.contains(RepliconTick::new(0)));
         assert!(history.contains(RepliconTick::new(1)));
         assert!(!history.contains(RepliconTick::new(2)));
+        assert_eq!(history.first_tick(), RepliconTick::new(0));
     }
 
     #[test]
@@ -280,6 +299,7 @@ mod tests {
         assert!(!history.contains(RepliconTick::new(u64::BITS)));
         assert!(history.contains(RepliconTick::new(u64::BITS + 1)));
         assert!(!history.contains(RepliconTick::new(u64::BITS + 2)));
+        assert_eq!(history.first_tick(), RepliconTick::new(1));
     }
 
     #[test]
@@ -292,5 +312,6 @@ mod tests {
         assert!(history.contains(RepliconTick::new(1)));
         assert!(!history.contains(RepliconTick::new(3)));
         assert!(history.contains(RepliconTick::new(u32::MAX)));
+        assert_eq!(history.first_tick(), RepliconTick::new(u32::MAX));
     }
 }
