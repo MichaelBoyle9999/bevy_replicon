@@ -127,8 +127,9 @@ pub type ConfirmedChangedFn =
 /// reaches the client in the update dated at its arrival, with that tick's
 /// confirmed values. Asked only for entities a client hasn't received.
 ///
-/// Server messages naming the entity are not withheld: their senders check its
-/// presence themselves, or a client can't map the entity they name.
+/// Server messages and replicated entity references naming the entity are not
+/// withheld: their senders check its presence themselves, or a client can't map
+/// the entity they name.
 ///
 /// # Safety
 ///
