@@ -686,7 +686,7 @@ fn apply_mutations(
     let server_entity = postcard_utils::entity_from_buf(message)?;
     let data_size: usize = postcard_utils::from_buf(message)?;
 
-    let Some(client_entity) = params.entity_map.to_client_for_mutations(server_entity) else {
+    let Some(client_entity) = params.entity_map.client_entity(server_entity) else {
         // Mutation could arrive after a despawn that freed the client entity.
         debug!("ignoring mutations received for unknown server's `{server_entity}`");
         message.advance(data_size);

@@ -343,6 +343,10 @@ fn componentless_entity_reaches_the_client_at_its_arrival_tick() {
     exchange(&mut server_app, &mut client_app);
 
     assert_eq!(client_entity_count(&mut client_app), 1);
+    assert_eq!(
+        client_app.world().resource::<ServerUpdateTick>().get(),
+        arrival
+    );
 }
 
 #[test]

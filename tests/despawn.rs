@@ -1,4 +1,4 @@
-use bevy::{prelude::*, state::app::StatesPlugin};
+use bevy::{ecs::entity::MapEntities, prelude::*, state::app::StatesPlugin};
 use bevy_replicon::{
     prelude::*,
     shared::{
@@ -184,6 +184,102 @@ fn mutation_received_after_the_despawn() {
         1,
         "a mutation sent before the despawn must apply to the kept entity even when it arrives \
          after the despawn"
+    );
+}
+
+#[test]
+fn references_received_after_the_despawn_map_to_the_kept_entity() {
+    let mut server_app = App::new();
+    let mut client_app = App::new();
+    for app in [&mut server_app, &mut client_app] {
+        app.add_plugins((
+            MinimalPlugins,
+            StatesPlugin,
+            RepliconPlugins.set(ServerPlugin::new(PostUpdate)),
+        ))
+        .replicate::<CounterComponent>()
+        .replicate::<MappedComponent>()
+        .add_mapped_server_message::<NamedEntity>(Channel::Unreliable)
+        .finish();
+    }
+    client_app
+        .world_mut()
+        .resource_mut::<ReplicationRegistry>()
+        .despawn = mark_despawned;
+
+    server_app.connect_client(&mut client_app);
+
+    let departing = server_app
+        .world_mut()
+        .spawn((Replicated, CounterComponent(0)))
+        .id();
+    let referrer = server_app
+        .world_mut()
+        .spawn((Replicated, MappedComponent(Entity::PLACEHOLDER)))
+        .id();
+
+    server_app.update();
+    server_app.exchange_with_client(&mut client_app);
+    client_app.update();
+    server_app.exchange_with_client(&mut client_app);
+
+    server_app
+        .world_mut()
+        .get_mut::<MappedComponent>(referrer)
+        .unwrap()
+        .0 = departing;
+    server_app.world_mut().write_message(ToClients {
+        mode: SendMode::Broadcast,
+        message: NamedEntity(departing),
+    });
+    server_app.update();
+    server_app.world_mut().despawn(departing);
+    server_app.update();
+
+    let mut delayed = Vec::new();
+    let mut client_messages = client_app.world_mut().resource_mut::<ClientMessages>();
+    for (_, channel_id, message) in server_app
+        .world_mut()
+        .resource_mut::<ServerMessages>()
+        .drain_sent()
+    {
+        if channel_id == usize::from(ServerChannel::Updates) {
+            client_messages.insert_received(channel_id, message);
+        } else {
+            delayed.push((channel_id, message));
+        }
+    }
+    client_app.update();
+    let kept = client_app
+        .world_mut()
+        .query_filtered::<Entity, With<Despawned>>()
+        .single(client_app.world())
+        .expect("the despawn must arrive before the messages sent ahead of it");
+    let entities_before = entity_count(&mut client_app);
+
+    let mut client_messages = client_app.world_mut().resource_mut::<ClientMessages>();
+    for (channel_id, message) in delayed {
+        client_messages.insert_received(channel_id, message);
+    }
+    client_app.update();
+
+    let reference = client_app
+        .world_mut()
+        .query::<&MappedComponent>()
+        .single(client_app.world())
+        .unwrap()
+        .0;
+    let named: Vec<_> = client_app
+        .world()
+        .resource::<Messages<NamedEntity>>()
+        .iter_current_update_messages()
+        .map(|named| named.0)
+        .collect();
+    assert_eq!(
+        (reference, named, entity_count(&mut client_app)),
+        (kept, vec![kept], entities_before),
+        "a component and a server message sent before the despawn must name the kept entity \
+         even when they arrive after the despawn, spawning nothing"
     );
 }
 
@@ -621,3 +717,16 @@ impl VisibilityFilter for ComponentVisibility {
         component.is_some()
     }
 }
+
+fn entity_count(app: &mut App) -> usize {
+    app.world_mut()
+        .query::<EntityRef>()
+        .iter(app.world())
+        .count()
+}
+
+#[derive(Component, Deserialize, Serialize, MapEntities)]
+struct MappedComponent(#[entities] Entity);
+
+#[derive(Message, Deserialize, Serialize, MapEntities, Clone, Copy)]
+struct NamedEntity(#[entities] Entity);

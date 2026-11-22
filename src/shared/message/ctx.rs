@@ -63,8 +63,8 @@ pub struct ClientReceiveCtx<'a> {
 
 impl EntityMapper for ClientReceiveCtx<'_> {
     fn get_mapped(&mut self, source: Entity) -> Entity {
-        if let Some(mapped_entity) = self.entity_map.to_client().get(&source) {
-            *mapped_entity
+        if let Some(mapped_entity) = self.entity_map.client_entity(source) {
+            mapped_entity
         } else {
             self.invalid_entities.push(source);
             Entity::PLACEHOLDER

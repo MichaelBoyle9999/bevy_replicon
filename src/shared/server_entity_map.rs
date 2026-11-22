@@ -13,8 +13,9 @@ use log::{error, warn};
 /// the mapping is kept until the server also despawns the entity.
 ///
 /// If the despawn function keeps the client entity, such as to keep it for rollback,
-/// mutations from the server for ticks before the despawn still apply to it until
-/// the client entity is despawned, even when they arrive after the despawn.
+/// the server entity stays mapped to it until the client entity is despawned, so
+/// mutations, entity references and server messages for ticks before the despawn
+/// still reach it, even when they arrive after the despawn.
 #[derive(Resource, Default)]
 pub struct ServerEntityMap {
     server_to_client: EntityHashMap<Entity>,
@@ -61,7 +62,7 @@ impl ServerEntityMap {
     }
 
     /// Keeps a despawned server entity's client entity, which its despawn function kept,
-    /// reachable through [`Self::to_client_for_mutations`].
+    /// reachable through [`Self::client_entity`].
     pub(crate) fn insert_departed(&mut self, server_entity: Entity, client_entity: Entity) {
         self.departed.insert(server_entity, client_entity);
     }
@@ -72,13 +73,26 @@ impl ServerEntityMap {
             .retain(|_, &mut client_entity| is_kept(client_entity));
     }
 
-    /// Returns the client entity that mutations for `server_entity` apply to,
-    /// including one whose server entity was despawned but whose client entity was kept.
-    pub(crate) fn to_client_for_mutations(&self, server_entity: Entity) -> Option<Entity> {
+    /// Returns the client entity of `server_entity`, including one whose server entity
+    /// was despawned but whose client entity was kept.
+    pub(crate) fn client_entity(&self, server_entity: Entity) -> Option<Entity> {
         self.server_to_client
             .get(&server_entity)
             .or_else(|| self.departed.get(&server_entity))
             .copied()
+    }
+
+    /// Returns the client entity of `server_entity` as [`Self::client_entity`] does,
+    /// mapping it to the entity `spawn` returns if it has none.
+    pub(crate) fn client_entity_or_insert_with(
+        &mut self,
+        server_entity: Entity,
+        spawn: impl FnOnce() -> Entity,
+    ) -> Entity {
+        match self.departed.get(&server_entity) {
+            Some(&kept) => kept,
+            None => self.server_entry(server_entity).or_insert_with(spawn),
+        }
     }
 
     /// Clears the map.
