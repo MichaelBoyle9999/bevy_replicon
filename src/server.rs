@@ -824,6 +824,10 @@ fn collect_changes(
         let archetype = unsafe { archetypes.get(replicated_archetype.id).unwrap_unchecked() };
 
         for entity in archetype.entities() {
+            // SAFETY: the installed hook obeys the `ConfirmedPresentFn` contract.
+            let present = confirmed_source.fns().is_none_or(|fns| unsafe {
+                query.confirmed_present(fns.present, entity.id(), **server_tick)
+            });
             let mut entity_range = None;
             for (_, mut updates, mut mutations, ..) in &mut clients {
                 updates.start_entity_changes();
@@ -898,7 +902,12 @@ fn collect_changes(
                         continue;
                     }
 
-                    if let Some(entity_ticks) = client_ticks.entities.get(&entity.id())
+                    let entity_ticks = client_ticks.entities.get(&entity.id());
+                    if entity_ticks.is_none() && !present {
+                        continue;
+                    }
+
+                    if let Some(entity_ticks) = entity_ticks
                         && entity_ticks.components.contains(component_index)
                     {
                         let base_priority = priority.get(&entity.id()).copied().unwrap_or(1.0);
@@ -972,6 +981,10 @@ fn collect_changes(
 
                 let entity_ticks = ticks.entities.entry(entity.id());
                 let new_for_client = matches!(entity_ticks, Entry::Vacant(_));
+                if new_for_client && !present {
+                    continue;
+                }
+
                 if new_for_client
                     || updates.changed_entity_added()
                     || removal_buffer.is_released(entity.id())

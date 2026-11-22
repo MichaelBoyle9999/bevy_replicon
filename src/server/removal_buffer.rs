@@ -503,7 +503,12 @@ mod tests {
         .finish();
         app.world_mut()
             .resource_mut::<ConfirmedReplicationSource>()
-            .set(confirmed_a, confirmed_a_ahead, confirmed_a_changed);
+            .set(
+                confirmed_a,
+                confirmed_a_ahead,
+                confirmed_a_changed,
+                confirmed_a_present,
+            );
         app.world_mut()
             .resource_mut::<NextState<ServerState>>()
             .set(ServerState::Running);
@@ -573,6 +578,14 @@ mod tests {
         _component: ComponentId,
         _after: RepliconTick,
         _until: RepliconTick,
+    ) -> bool {
+        true
+    }
+
+    unsafe fn confirmed_a_present(
+        _world: UnsafeWorldCell<'_>,
+        _entity: Entity,
+        _tick: RepliconTick,
     ) -> bool {
         true
     }

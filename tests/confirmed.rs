@@ -7,8 +7,8 @@ use bevy::{
     state::app::StatesPlugin,
 };
 use bevy_replicon::{
-    prelude::*, server::server_tick::ServerTick, shared::replicon_tick::RepliconTick,
-    test_app::ServerTestAppExt,
+    client::ServerUpdateTick, prelude::*, server::server_tick::ServerTick,
+    shared::replicon_tick::RepliconTick, test_app::ServerTestAppExt,
 };
 use serde::{Deserialize, Serialize};
 use test_log::test;
@@ -306,6 +306,69 @@ fn undone_removal_is_not_sent() {
     }
 }
 
+#[test]
+fn entity_reaches_the_client_at_its_arrival_tick_with_that_ticks_values() {
+    let (mut server_app, mut client_app) = confirmed_pair();
+    let arrival = next_send_tick(&server_app) + 2;
+    server_app.world_mut().spawn((
+        Replicated,
+        V(9),
+        ArrivesAt(arrival),
+        ConfirmedV(vec![(arrival, Some(V(1)))]),
+    ));
+
+    for _ in 0..2 {
+        exchange(&mut server_app, &mut client_app);
+        assert_eq!(client_entity_count(&mut client_app), 0);
+    }
+    exchange(&mut server_app, &mut client_app);
+
+    assert_eq!(client_value(&mut client_app), Some(V(1)));
+    assert_eq!(
+        client_app.world().resource::<ServerUpdateTick>().get(),
+        arrival
+    );
+}
+
+#[test]
+fn componentless_entity_reaches_the_client_at_its_arrival_tick() {
+    let (mut server_app, mut client_app) = confirmed_pair();
+    let arrival = next_send_tick(&server_app) + 1;
+    server_app
+        .world_mut()
+        .spawn((Replicated, ArrivesAt(arrival)));
+
+    exchange(&mut server_app, &mut client_app);
+    assert_eq!(client_entity_count(&mut client_app), 0);
+    exchange(&mut server_app, &mut client_app);
+
+    assert_eq!(client_entity_count(&mut client_app), 1);
+}
+
+#[test]
+fn received_entity_stays_with_the_client_whatever_its_presence() {
+    let (mut server_app, mut client_app) = confirmed_pair();
+    let server_entity = spawn_confirmed(&mut server_app, &mut client_app);
+    let after = next_send_tick(&server_app) + 1;
+    server_app
+        .world_mut()
+        .entity_mut(server_entity)
+        .insert(ArrivesAt(after));
+    record(&mut server_app, server_entity, after - 1, Some(V(2)));
+
+    exchange(&mut server_app, &mut client_app);
+
+    assert_eq!(client_value(&mut client_app), Some(V(2)));
+}
+
+fn client_entity_count(client_app: &mut App) -> usize {
+    client_app
+        .world_mut()
+        .query_filtered::<(), With<Remote>>()
+        .iter(client_app.world())
+        .count()
+}
+
 fn confirmed_pair() -> (App, App) {
     let mut server_app = App::new();
     let mut client_app = App::new();
@@ -321,7 +384,12 @@ fn confirmed_pair() -> (App, App) {
     server_app
         .world_mut()
         .resource_mut::<ConfirmedReplicationSource>()
-        .set(confirmed_v, confirmed_v_ahead, confirmed_v_changed);
+        .set(
+            confirmed_v,
+            confirmed_v_ahead,
+            confirmed_v_changed,
+            confirmed_v_present,
+        );
     server_app.connect_client(&mut client_app);
     (server_app, client_app)
 }
@@ -434,6 +502,20 @@ unsafe fn confirmed_v_changed(
         .into_iter()
         .flat_map(|confirmed| &confirmed.0)
         .any(|&(at, _)| after.get() < at && at <= until.get())
+}
+
+/// The tick from which the confirmed history records the entity as present;
+/// an entity without one is present at every tick.
+#[derive(Component)]
+struct ArrivesAt(u32);
+
+unsafe fn confirmed_v_present(world: UnsafeWorldCell, entity: Entity, tick: RepliconTick) -> bool {
+    // SAFETY: the send systems only read `ArrivesAt`.
+    world
+        .get_entity(entity)
+        .ok()
+        .and_then(|entity| unsafe { entity.get::<ArrivesAt>() })
+        .is_none_or(|arrives| arrives.0 <= tick.get())
 }
 
 fn confirmed_history(world: UnsafeWorldCell<'_>, entity: Entity) -> Option<&ConfirmedV> {

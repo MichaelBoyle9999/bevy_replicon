@@ -746,7 +746,7 @@ pub mod prelude {
         AuthorizedClient, PriorityMap, ServerPlugin, ServerSystems,
         confirmed_source::{
             ConfirmedAhead, ConfirmedAheadFn, ConfirmedChangedFn, ConfirmedLookup,
-            ConfirmedLookupFn, ConfirmedReplicationSource,
+            ConfirmedLookupFn, ConfirmedPresentFn, ConfirmedReplicationSource,
         },
         message::ServerMessagePlugin,
         related_entities::SyncRelatedAppExt,

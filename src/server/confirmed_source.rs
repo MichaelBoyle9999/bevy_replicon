@@ -116,12 +116,26 @@ pub type ConfirmedAheadFn =
 pub type ConfirmedChangedFn =
     for<'w> unsafe fn(UnsafeWorldCell<'w>, Entity, ComponentId, RepliconTick, RepliconTick) -> bool;
 
+/// Whether the confirmed history records `entity` as present at `tick`,
+/// reading from the world through the cell.
+///
+/// An entity is sent to a client that hasn't received it only from the first
+/// [`ServerTick`](super::server_tick::ServerTick) at which it is present, so it
+/// reaches the client in the update dated at its arrival, with that tick's
+/// confirmed values. Asked only for entities a client hasn't received.
+///
+/// # Safety
+///
+/// The implementation must only *read* through the cell.
+pub type ConfirmedPresentFn = for<'w> unsafe fn(UnsafeWorldCell<'w>, Entity, RepliconTick) -> bool;
+
 /// The functions a [`ConfirmedReplicationSource`] reads confirmed history with.
 #[derive(Clone, Copy)]
 pub(crate) struct ConfirmedHistoryFns {
     pub(crate) lookup: ConfirmedLookupFn,
     pub(crate) ahead: ConfirmedAheadFn,
     pub(crate) changed: ConfirmedChangedFn,
+    pub(crate) present: ConfirmedPresentFn,
 }
 
 /// Optional authority-side source of confirmed component values.
@@ -140,11 +154,13 @@ impl ConfirmedReplicationSource {
         lookup: ConfirmedLookupFn,
         ahead: ConfirmedAheadFn,
         changed: ConfirmedChangedFn,
+        present: ConfirmedPresentFn,
     ) {
         self.0 = Some(ConfirmedHistoryFns {
             lookup,
             ahead,
             changed,
+            present,
         });
     }
 

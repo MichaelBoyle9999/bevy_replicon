@@ -17,6 +17,7 @@ use crate::{
     prelude::*,
     server::confirmed_source::{
         ConfirmedAhead, ConfirmedAheadFn, ConfirmedChangedFn, ConfirmedLookup, ConfirmedLookupFn,
+        ConfirmedPresentFn,
     },
     shared::replication::rules::ReplicationRules,
 };
@@ -131,6 +132,23 @@ impl<'w> ReplicationQuery<'w, '_> {
     ) -> bool {
         // SAFETY: caller upholds the `ConfirmedChangedFn` contract.
         unsafe { changed(self.world, entity, component_id, after, until) }
+    }
+
+    /// Asks a confirmed-value source whether `entity` is present at `tick`,
+    /// using this query's world access.
+    ///
+    /// # Safety
+    ///
+    /// `present` must obey the [`ConfirmedPresentFn`] contract — read-only
+    /// world access.
+    pub(super) unsafe fn confirmed_present(
+        &self,
+        present: ConfirmedPresentFn,
+        entity: Entity,
+        tick: RepliconTick,
+    ) -> bool {
+        // SAFETY: caller upholds the `ConfirmedPresentFn` contract.
+        unsafe { present(self.world, entity, tick) }
     }
 }
 
