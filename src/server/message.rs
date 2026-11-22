@@ -33,20 +33,22 @@ impl Plugin for ServerMessagePlugin {
             .remove_resource::<RemoteMessageRegistry>()
             .expect("message registry should be initialized on app build");
 
-        let send_or_buffer_fn = (
-            FilteredResourcesParamBuilder::new(|builder| {
-                for message in registry.iter_all_server() {
-                    builder.add_read_by_id(message.to_messages_id());
-                }
-            }),
-            ParamBuilder,
-            ParamBuilder,
-            ParamBuilder,
-            ParamBuilder,
-            ParamBuilder,
-        )
-            .build_state(app.world_mut())
-            .build_system(send_or_buffer);
+        let send_or_buffer_fn = |world: &mut World| {
+            (
+                FilteredResourcesParamBuilder::new(|builder| {
+                    for message in registry.iter_all_server() {
+                        builder.add_read_by_id(message.to_messages_id());
+                    }
+                }),
+                ParamBuilder,
+                ParamBuilder,
+                ParamBuilder,
+                ParamBuilder,
+                ParamBuilder,
+            )
+                .build_state(world)
+                .build_system(send_or_buffer)
+        };
 
         let receive_fn = (
             FilteredResourcesMutParamBuilder::new(|builder| {
@@ -73,27 +75,34 @@ impl Plugin for ServerMessagePlugin {
             .build_state(app.world_mut())
             .build_system(trigger);
 
-        let send_locally_fn = (
-            FilteredResourcesMutParamBuilder::new(|builder| {
-                for message in registry.iter_all_server() {
-                    builder.add_write_by_id(message.to_messages_id());
-                }
-            }),
-            FilteredResourcesMutParamBuilder::new(|builder| {
-                for message in registry.iter_all_server() {
-                    builder.add_write_by_id(message.messages_id());
-                }
-            }),
-            ParamBuilder,
-        )
-            .build_state(app.world_mut())
-            .build_system(send_locally);
+        let send_locally_fn = |world: &mut World| {
+            (
+                FilteredResourcesMutParamBuilder::new(|builder| {
+                    for message in registry.iter_all_server() {
+                        builder.add_write_by_id(message.to_messages_id());
+                    }
+                }),
+                FilteredResourcesMutParamBuilder::new(|builder| {
+                    for message in registry.iter_all_server() {
+                        builder.add_write_by_id(message.messages_id());
+                    }
+                }),
+                ParamBuilder,
+            )
+                .build_state(world)
+                .build_system(send_locally)
+        };
 
         let replication_schedule = app
             .get_added_plugins::<ServerPlugin>()
             .first()
             .expect("server messages require the server plugin")
             .replication_schedule;
+
+        let send_or_buffer_after_frame = send_or_buffer_fn(app.world_mut());
+        let send_locally_after_frame = send_locally_fn(app.world_mut());
+        let send_or_buffer_with_replication = send_or_buffer_fn(app.world_mut());
+        let send_locally_with_replication = send_locally_fn(app.world_mut());
 
         app.insert_resource(registry)
             .add_systems(
@@ -108,26 +117,33 @@ impl Plugin for ServerMessagePlugin {
             .add_systems(
                 PostUpdate,
                 (
-                    send_or_buffer_fn
-                        .run_if(in_state(ServerState::Running))
-                        .in_set(BufferMessages),
-                    send_locally_fn.run_if(in_state(ClientState::Disconnected)),
+                    send_or_buffer_after_frame.run_if(in_state(ServerState::Running)),
+                    send_locally_after_frame.run_if(in_state(ClientState::Disconnected)),
                 )
                     .chain()
                     .after(super::send_messages)
+                    .in_set(BufferFrameMessages)
                     .in_set(ServerSystems::Send),
             )
             .add_systems(
                 replication_schedule,
-                send_buffered
+                (
+                    send_or_buffer_with_replication.run_if(in_state(ServerState::Running)),
+                    send_locally_with_replication.run_if(in_state(ClientState::Disconnected)),
+                    send_buffered
+                        .run_if(in_state(ServerState::Running))
+                        .run_if(resource_changed::<ServerTick>),
+                )
+                    .chain()
                     .after(super::send_messages)
-                    .after(BufferMessages)
-                    .run_if(in_state(ServerState::Running))
-                    .run_if(resource_changed::<ServerTick>)
+                    .after(BufferFrameMessages)
                     .in_set(ServerSystems::Send),
             );
     }
 }
+
+#[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone, Copy)]
+struct BufferFrameMessages;
 
 fn send_or_buffer(
     to_messages: FilteredResources,
@@ -159,9 +175,6 @@ fn send_or_buffer(
         }
     }
 }
-
-#[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone, Copy)]
-struct BufferMessages;
 
 fn send_buffered(
     mut messages: ResMut<ServerMessages>,

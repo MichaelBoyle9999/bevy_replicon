@@ -9,6 +9,7 @@ use bevy::{
 use bevy_replicon::{
     client::server_mutate_ticks::MutateTickReceived,
     prelude::*,
+    server::server_tick::ServerTick,
     shared::{replication::track_mutate_messages::TrackAppExt, server_entity_map::ServerEntityMap},
     test_app::ServerTestAppExt,
 };
@@ -140,3 +141,59 @@ fn spawn_and_announce(mut commands: Commands, mut messages: MessageWriter<ToClie
 
 #[derive(Message, Serialize, Deserialize, MapEntities)]
 struct WithEntity(#[entities] Entity);
+
+#[test]
+fn fixed_replication_sends_a_message_written_before_a_ticks_send_with_that_tick() {
+    let mut server_app = App::new();
+    let mut client_app = App::new();
+    server_app.add_plugins((
+        MinimalPlugins,
+        StatesPlugin,
+        RepliconPlugins.set(ServerPlugin {
+            replication_schedule: FixedPostUpdate.intern(),
+            ..ServerPlugin::new(FixedPostUpdate)
+        }),
+    ));
+    client_app.add_plugins((MinimalPlugins, StatesPlugin, RepliconPlugins));
+    for app in [&mut server_app, &mut client_app] {
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO))
+            .add_server_message::<TickMessage>(Channel::Ordered)
+            .finish();
+    }
+    server_app.add_systems(
+        FixedPostUpdate,
+        write_tick_message
+            .after(ServerSystems::IncrementTick)
+            .before(ServerSystems::Send),
+    );
+
+    server_app.connect_client(&mut client_app);
+    let timestep = server_app.world().resource::<Time<Fixed>>().timestep();
+    server_app.insert_resource(TimeUpdateStrategy::ManualDuration(timestep));
+    server_app.update();
+    server_app.exchange_with_client(&mut client_app);
+    client_app.update();
+
+    let tick = server_app.world().resource::<ServerTick>().get();
+    let received: Vec<_> = client_app
+        .world_mut()
+        .resource_mut::<Messages<TickMessage>>()
+        .drain()
+        .map(|message| message.0)
+        .collect();
+    assert_eq!(
+        received,
+        [tick],
+        "a message written in a tick before its send must go out with that tick's send"
+    );
+}
+
+fn write_tick_message(tick: Res<ServerTick>, mut messages: MessageWriter<ToClients<TickMessage>>) {
+    messages.write(ToClients {
+        mode: SendMode::Broadcast,
+        message: TickMessage(tick.get()),
+    });
+}
+
+#[derive(Message, Serialize, Deserialize)]
+struct TickMessage(u32);
