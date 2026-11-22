@@ -501,14 +501,18 @@ mod tests {
         ))
         .replicate::<A>()
         .finish();
-        app.world_mut()
-            .resource_mut::<ConfirmedReplicationSource>()
-            .set(
+        let confirmed_a_id = app.world_mut().register_component::<ConfirmedA>();
+        let mut source = app.world_mut().resource_mut::<ConfirmedReplicationSource>();
+        // SAFETY: the lookups read only `ConfirmedA`.
+        unsafe {
+            source.set(
                 confirmed_a,
                 confirmed_a_ahead,
                 confirmed_a_changed,
                 confirmed_a_present,
-            );
+                [confirmed_a_id],
+            )
+        };
         app.world_mut()
             .resource_mut::<NextState<ServerState>>()
             .set(ServerState::Running);

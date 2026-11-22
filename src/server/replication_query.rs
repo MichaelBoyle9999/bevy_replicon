@@ -17,12 +17,13 @@ use crate::{
     prelude::*,
     server::confirmed_source::{
         ConfirmedAhead, ConfirmedAheadFn, ConfirmedChangedFn, ConfirmedLookup, ConfirmedLookupFn,
-        ConfirmedPresentFn,
+        ConfirmedPresentFn, ConfirmedReplicationSource,
     },
     shared::replication::rules::ReplicationRules,
 };
 
-/// Like [`Query`], but provides dynamic access only for replicated components.
+/// Like [`Query`], but provides dynamic access only for replicated components
+/// and the components the [`ConfirmedReplicationSource`] reads.
 ///
 /// We don't use [`FilteredEntityRef`](bevy::ecs::world::FilteredEntityRef) to avoid access checks
 /// and [`StorageType`] fetch (we cache this information on replicated archetypes).
@@ -170,6 +171,11 @@ unsafe impl SystemParam for ReplicationQuery<'_, '_> {
             }
         }
 
+        let mut source = world.resource_mut::<ConfirmedReplicationSource>();
+        for &id in source.declare_reads() {
+            component_access.add_component_read(id);
+        }
+
         Self::State { component_access }
     }
 
@@ -182,7 +188,7 @@ unsafe impl SystemParam for ReplicationQuery<'_, '_> {
         let conflicts = component_access_set.get_conflicts_single(&state.component_access);
         if !conflicts.is_empty() {
             panic!(
-                "replicated components in system `{}` shouldn't be in conflict with other system parameters",
+                "replicated and confirmed-source components in system `{}` shouldn't be in conflict with other system parameters",
                 system_meta.name(),
             );
         }
@@ -203,7 +209,7 @@ unsafe impl SystemParam for ReplicationQuery<'_, '_> {
 unsafe impl ReadOnlySystemParam for ReplicationQuery<'_, '_> {}
 
 pub(crate) struct ReplicationQueryState {
-    /// All replicated components.
+    /// All replicated components and the confirmed source's reads.
     ///
     /// Used only in debug to check component access.
     component_access: FilteredAccess,
@@ -221,7 +227,8 @@ mod tests {
     #[should_panic]
     fn query_after() {
         let mut app = App::new();
-        app.init_resource::<ReplicationRegistry>()
+        app.insert_resource(ConfirmedReplicationSource::unset())
+            .init_resource::<ReplicationRegistry>()
             .init_resource::<ProtocolHasher>()
             .init_resource::<ReplicationRules>()
             .replicate::<Test>()
@@ -234,7 +241,8 @@ mod tests {
     #[should_panic]
     fn query_before() {
         let mut app = App::new();
-        app.init_resource::<ReplicationRegistry>()
+        app.insert_resource(ConfirmedReplicationSource::unset())
+            .init_resource::<ReplicationRegistry>()
             .init_resource::<ProtocolHasher>()
             .init_resource::<ReplicationRules>()
             .replicate::<Test>()
@@ -246,7 +254,8 @@ mod tests {
     #[test]
     fn readonly_query() {
         let mut app = App::new();
-        app.init_resource::<ReplicationRules>()
+        app.insert_resource(ConfirmedReplicationSource::unset())
+            .init_resource::<ReplicationRules>()
             .init_resource::<ProtocolHasher>()
             .init_resource::<ReplicationRegistry>()
             .replicate::<Test>()
@@ -258,12 +267,79 @@ mod tests {
     #[test]
     fn not_replicated() {
         let mut app = App::new();
-        app.init_resource::<ReplicationRules>()
+        app.insert_resource(ConfirmedReplicationSource::unset())
+            .init_resource::<ReplicationRules>()
             .add_systems(Update, |_: ReplicationQuery, _: Query<&mut Test>| {});
 
         app.update();
     }
 
+    #[test]
+    #[should_panic(expected = "History in a way that conflicts")]
+    fn source_read_in_conflict() {
+        let mut app = App::new();
+        app.insert_resource(ConfirmedReplicationSource::unset())
+            .init_resource::<ReplicationRules>()
+            .add_systems(Update, |_: ReplicationQuery, _: Query<&mut History>| {});
+        install_history_source(app.world_mut());
+
+        app.update();
+    }
+
+    #[test]
+    #[should_panic(expected = "before the replication systems initialize")]
+    fn source_installed_after_initialization() {
+        let mut app = App::new();
+        app.insert_resource(ConfirmedReplicationSource::unset())
+            .init_resource::<ReplicationRules>()
+            .add_systems(Update, |_: ReplicationQuery| {});
+        app.update();
+
+        install_history_source(app.world_mut());
+    }
+
+    fn install_history_source(world: &mut World) {
+        let history_id = world.register_component::<History>();
+        let mut source = world.resource_mut::<ConfirmedReplicationSource>();
+        // SAFETY: the lookups read nothing.
+        unsafe { source.set(live, nothing_ahead, unchanged, present, [history_id]) };
+    }
+
+    unsafe fn live<'w>(
+        _: UnsafeWorldCell<'w>,
+        _: Entity,
+        _: ComponentId,
+        _: RepliconTick,
+    ) -> ConfirmedLookup<'w> {
+        ConfirmedLookup::Live
+    }
+
+    unsafe fn nothing_ahead(
+        _: UnsafeWorldCell,
+        _: Entity,
+        _: ComponentId,
+        _: RepliconTick,
+    ) -> ConfirmedAhead {
+        ConfirmedAhead::default()
+    }
+
+    unsafe fn unchanged(
+        _: UnsafeWorldCell,
+        _: Entity,
+        _: ComponentId,
+        _: RepliconTick,
+        _: RepliconTick,
+    ) -> bool {
+        false
+    }
+
+    unsafe fn present(_: UnsafeWorldCell, _: Entity, _: RepliconTick) -> bool {
+        true
+    }
+
     #[derive(Component, Serialize, Deserialize)]
     struct Test;
+
+    #[derive(Component)]
+    struct History;
 }

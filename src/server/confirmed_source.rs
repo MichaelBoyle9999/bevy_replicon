@@ -63,7 +63,8 @@ pub enum ConfirmedLookup<'w> {
 /// # Safety
 ///
 /// The implementation must only *read* through the cell (no structural changes,
-/// no aliasing mutable access). Any [`Ptr`] returned in
+/// no aliasing mutable access), and only the components the source declares
+/// (see [`ConfirmedReplicationSource::set`]). Any [`Ptr`] returned in
 /// [`ConfirmedLookup::Confirmed`] must point to a live value of the same type as
 /// `component`'s storage, valid for the cell's lifetime.
 pub type ConfirmedLookupFn = for<'w> unsafe fn(
@@ -95,7 +96,8 @@ pub struct ConfirmedAhead {
 ///
 /// # Safety
 ///
-/// The implementation must only *read* through the cell.
+/// The implementation must only *read* through the cell, and only the
+/// components the source declares (see [`ConfirmedReplicationSource::set`]).
 pub type ConfirmedAheadFn =
     for<'w> unsafe fn(UnsafeWorldCell<'w>, Entity, ComponentId, RepliconTick) -> ConfirmedAhead;
 
@@ -114,7 +116,8 @@ pub type ConfirmedAheadFn =
 ///
 /// # Safety
 ///
-/// The implementation must only *read* through the cell.
+/// The implementation must only *read* through the cell, and only the
+/// components the source declares (see [`ConfirmedReplicationSource::set`]).
 pub type ConfirmedChangedFn =
     for<'w> unsafe fn(UnsafeWorldCell<'w>, Entity, ComponentId, RepliconTick, RepliconTick) -> bool;
 
@@ -133,7 +136,8 @@ pub type ConfirmedChangedFn =
 ///
 /// # Safety
 ///
-/// The implementation must only *read* through the cell.
+/// The implementation must only *read* through the cell, and only the
+/// components the source declares (see [`ConfirmedReplicationSource::set`]).
 pub type ConfirmedPresentFn = for<'w> unsafe fn(UnsafeWorldCell<'w>, Entity, RepliconTick) -> bool;
 
 /// The functions a [`ConfirmedReplicationSource`] reads confirmed history with.
@@ -151,33 +155,76 @@ pub(crate) struct ConfirmedHistoryFns {
 /// authoritative-server behaviour). Installing a [`ConfirmedLookupFn`] makes the
 /// authority replicate `history[ServerTick]` while its live components run ahead
 /// at the predicted present.
-#[derive(Resource, Default)]
-pub struct ConfirmedReplicationSource(Option<ConfirmedHistoryFns>);
+///
+/// The components the installed functions read are part of the replication
+/// systems' declared access, so the scheduler never runs a system writing them
+/// concurrently with replication, and rejects one that writes them in a
+/// replication system's own parameters. That access is fixed once the
+/// replication systems initialize, so installing afterwards panics.
+#[derive(Resource)]
+pub struct ConfirmedReplicationSource {
+    fns: Option<ConfirmedHistoryFns>,
+    reads: Vec<ComponentId>,
+    access_declared: bool,
+}
 
 impl ConfirmedReplicationSource {
-    /// Install the lookups, replacing any previous ones.
-    pub fn set(
+    /// An unset source whose access is still undeclared.
+    pub(crate) fn unset() -> Self {
+        Self {
+            fns: None,
+            reads: Vec::new(),
+            access_declared: false,
+        }
+    }
+
+    /// Install the lookups, replacing any previous ones, with `reads` the
+    /// components they read through the world cell.
+    ///
+    /// # Safety
+    ///
+    /// `reads` must hold, as ids of this world, every component the lookups
+    /// read, since replication declares no other access for them.
+    ///
+    /// # Panics
+    ///
+    /// Panics once the replication systems have initialized, since their
+    /// declared access no longer changes.
+    pub unsafe fn set(
         &mut self,
         lookup: ConfirmedLookupFn,
         ahead: ConfirmedAheadFn,
         changed: ConfirmedChangedFn,
         present: ConfirmedPresentFn,
+        reads: impl IntoIterator<Item = ComponentId>,
     ) {
-        self.0 = Some(ConfirmedHistoryFns {
+        assert!(
+            !self.access_declared,
+            "a confirmed replication source must be installed before the replication systems initialize"
+        );
+        self.fns = Some(ConfirmedHistoryFns {
             lookup,
             ahead,
             changed,
             present,
         });
+        self.reads = reads.into_iter().collect();
     }
 
     /// Remove the lookups, reverting to live-component serialization.
     pub fn clear(&mut self) {
-        self.0 = None;
+        self.fns = None;
+        self.reads.clear();
     }
 
     /// The installed lookups, if any.
     pub(crate) fn fns(&self) -> Option<ConfirmedHistoryFns> {
-        self.0
+        self.fns
+    }
+
+    /// The components the installed lookups read, from here on fixed.
+    pub(crate) fn declare_reads(&mut self) -> &[ComponentId] {
+        self.access_declared = true;
+        &self.reads
     }
 }

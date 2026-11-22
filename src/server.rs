@@ -137,7 +137,7 @@ impl Plugin for ServerPlugin {
             .init_resource::<ServerChangeTick>()
             .init_resource::<ClientPools>()
             .init_resource::<ReplicatedArchetypes>()
-            .init_resource::<ConfirmedReplicationSource>()
+            .insert_resource(ConfirmedReplicationSource::unset())
             .init_resource::<MessageBuffer>()
             .init_resource::<RelatedEntities>()
             .init_resource::<FilterRegistry>()

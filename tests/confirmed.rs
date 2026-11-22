@@ -13,6 +13,26 @@ use bevy_replicon::{
 use serde::{Deserialize, Serialize};
 use test_log::test;
 
+/// The confirmed source's reads are part of the replication systems' access,
+/// so the scheduler never runs a system writing them concurrently with them.
+#[test]
+fn a_writer_of_the_confirmed_history_conflicts_with_replication() {
+    let (mut server_app, _client_app) = confirmed_pair();
+    server_app.add_systems(PostUpdate, |_: Query<&mut ConfirmedV>| {});
+    server_app.update();
+
+    let history_id = server_app.world().component_id::<ConfirmedV>().unwrap();
+    let schedule = server_app.get_schedule(PostUpdate).unwrap();
+    assert!(
+        schedule
+            .graph()
+            .conflicting_systems()
+            .0
+            .iter()
+            .any(|(_, _, conflicts)| conflicts.contains(&history_id))
+    );
+}
+
 /// With a confirmed source, the live component runs ahead of the replicated
 /// [`ServerTick`]: a live removal reaches clients only once the confirmed state
 /// at `ServerTick` no longer has the component.
@@ -439,15 +459,23 @@ fn confirmed_pair() -> (App, App) {
         .replicate::<V>()
         .finish();
     }
-    server_app
+    let reads = [
+        server_app.world_mut().register_component::<ConfirmedV>(),
+        server_app.world_mut().register_component::<ArrivesAt>(),
+    ];
+    let mut source = server_app
         .world_mut()
-        .resource_mut::<ConfirmedReplicationSource>()
-        .set(
+        .resource_mut::<ConfirmedReplicationSource>();
+    // SAFETY: the lookups read only `ConfirmedV` and `ArrivesAt`.
+    unsafe {
+        source.set(
             confirmed_v,
             confirmed_v_ahead,
             confirmed_v_changed,
             confirmed_v_present,
-        );
+            reads,
+        )
+    };
     server_app.connect_client(&mut client_app);
     (server_app, client_app)
 }
