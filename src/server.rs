@@ -1176,16 +1176,26 @@ pub enum ServerSystems {
     IncrementTick,
     /// Systems that write data to [`ServerMessages`].
     ///
-    /// Replication, and the sending of server messages written before it, run in
-    /// [`ServerPlugin::replication_schedule`] if [`ServerTick`] changes. Server messages
-    /// written after a frame's last replication are buffered in [`PostUpdate`] for the
-    /// next one.
+    /// Runs in [`ServerPlugin::replication_schedule`], in this order:
+    /// 1. Replication, if [`ServerTick`] changed.
+    /// 2. The server messages written since they were last handled: independent ones are
+    ///    sent to clients and the others are buffered for them, and those the server itself
+    ///    is a recipient of are also written to its own [`Messages`].
+    /// 3. Every buffered message is sent, if [`ServerTick`] changed.
+    ///
+    /// Step 2 also runs in [`PostUpdate`]. With the default [`PostUpdate`] replication
+    /// schedule, it runs just before the replication schedule's own step 2, which then finds
+    /// nothing left. With any other replication schedule, messages written since its last run, up to this set in
+    /// [`PostUpdate`], are thus handled in that frame, even one that runs no tick:
+    /// independent ones go out with its packets, before a backend that acts on
+    /// [`DisconnectRequest`] after [`ServerSystems::SendPackets`] disconnects their client,
+    /// local deliveries are written in it, and the others wait in the buffer for the next send.
     Send,
     /// Systems that send packets to the messaging backend.
     ///
     /// Used by the messaging backend.
     ///
-    /// Runs in [`PostUpdate`] if [`ServerTick`] changes.
+    /// Runs in [`PostUpdate`].
     SendPackets,
 }
 

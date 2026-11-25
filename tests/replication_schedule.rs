@@ -197,3 +197,49 @@ fn write_tick_message(tick: Res<ServerTick>, mut messages: MessageWriter<ToClien
 
 #[derive(Message, Serialize, Deserialize)]
 struct TickMessage(u32);
+
+#[test]
+fn fixed_replication_sends_an_independent_message_in_a_frame_without_a_tick() {
+    let mut server_app = App::new();
+    let mut client_app = App::new();
+    server_app.add_plugins((
+        MinimalPlugins,
+        StatesPlugin,
+        RepliconPlugins.set(ServerPlugin {
+            replication_schedule: FixedPostUpdate.intern(),
+            ..ServerPlugin::new(FixedPostUpdate)
+        }),
+    ));
+    client_app.add_plugins((MinimalPlugins, StatesPlugin, RepliconPlugins));
+    for app in [&mut server_app, &mut client_app] {
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO))
+            .add_server_message::<TickMessage>(Channel::Ordered)
+            .make_message_independent::<TickMessage>()
+            .finish();
+    }
+
+    server_app.connect_client(&mut client_app);
+    server_app.add_systems(Update, write_tick_message.run_if(run_once));
+    let tick = server_app.world().resource::<ServerTick>().get();
+    server_app.update();
+    server_app.exchange_with_client(&mut client_app);
+    client_app.update();
+
+    assert_eq!(
+        server_app.world().resource::<ServerTick>().get(),
+        tick,
+        "the frame must run no tick"
+    );
+    let received: Vec<_> = client_app
+        .world_mut()
+        .resource_mut::<Messages<TickMessage>>()
+        .drain()
+        .map(|message| message.0)
+        .collect();
+    assert_eq!(
+        received,
+        [tick],
+        "an independent message must go out in the frame it is written, so that one written \
+         before a disconnect request, such as a protocol mismatch, reaches the client first"
+    );
+}
