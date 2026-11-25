@@ -21,7 +21,7 @@
 //! clients that haven't received it.
 
 use bevy::{
-    ecs::{component::ComponentId, world::unsafe_world_cell::UnsafeWorldCell},
+    ecs::{component::ComponentId, query::Access, world::unsafe_world_cell::UnsafeWorldCell},
     prelude::*,
     ptr::Ptr,
 };
@@ -164,8 +164,18 @@ pub(crate) struct ConfirmedHistoryFns {
 #[derive(Resource)]
 pub struct ConfirmedReplicationSource {
     fns: Option<ConfirmedHistoryFns>,
-    reads: Vec<ComponentId>,
+    declare_reads: DeclareReadsFn,
     access_declared: bool,
+}
+
+/// Adds the components a source's lookups read to `access`, resolving them in
+/// `world`, the world the replication systems run in.
+type DeclareReadsFn = fn(&mut World, &mut Access);
+
+fn declare_bundle_reads<R: Bundle>(world: &mut World, access: &mut Access) {
+    for &id in world.register_bundle::<R>().explicit_components() {
+        access.add_component_read(id);
+    }
 }
 
 impl ConfirmedReplicationSource {
@@ -173,30 +183,29 @@ impl ConfirmedReplicationSource {
     pub(crate) fn unset() -> Self {
         Self {
             fns: None,
-            reads: Vec::new(),
+            declare_reads: declare_bundle_reads::<()>,
             access_declared: false,
         }
     }
 
-    /// Install the lookups, replacing any previous ones, with `reads` the
+    /// Install the lookups, replacing any previous ones, with `R` the bundle of
     /// components they read through the world cell.
     ///
     /// # Safety
     ///
-    /// `reads` must hold, as ids of this world, every component the lookups
-    /// read, since replication declares no other access for them.
+    /// `R` must hold every component the lookups read, since replication
+    /// declares no other access for them.
     ///
     /// # Panics
     ///
     /// Panics once the replication systems have initialized, since their
     /// declared access no longer changes.
-    pub unsafe fn set(
+    pub unsafe fn set<R: Bundle>(
         &mut self,
         lookup: ConfirmedLookupFn,
         ahead: ConfirmedAheadFn,
         changed: ConfirmedChangedFn,
         present: ConfirmedPresentFn,
-        reads: impl IntoIterator<Item = ComponentId>,
     ) {
         assert!(
             !self.access_declared,
@@ -208,13 +217,13 @@ impl ConfirmedReplicationSource {
             changed,
             present,
         });
-        self.reads = reads.into_iter().collect();
+        self.declare_reads = declare_bundle_reads::<R>;
     }
 
     /// Remove the lookups, reverting to live-component serialization.
     pub fn clear(&mut self) {
         self.fns = None;
-        self.reads.clear();
+        self.declare_reads = declare_bundle_reads::<()>;
     }
 
     /// The installed lookups, if any.
@@ -222,9 +231,9 @@ impl ConfirmedReplicationSource {
         self.fns
     }
 
-    /// The components the installed lookups read, from here on fixed.
-    pub(crate) fn declare_reads(&mut self) -> &[ComponentId] {
+    /// Declares the components the installed lookups read, from here on fixed.
+    pub(crate) fn latch_reads(&mut self) -> DeclareReadsFn {
         self.access_declared = true;
-        &self.reads
+        self.declare_reads
     }
 }

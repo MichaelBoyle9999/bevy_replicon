@@ -459,21 +459,16 @@ fn confirmed_pair() -> (App, App) {
         .replicate::<V>()
         .finish();
     }
-    let reads = [
-        server_app.world_mut().register_component::<ConfirmedV>(),
-        server_app.world_mut().register_component::<ArrivesAt>(),
-    ];
     let mut source = server_app
         .world_mut()
         .resource_mut::<ConfirmedReplicationSource>();
     // SAFETY: the lookups read only `ConfirmedV` and `ArrivesAt`.
     unsafe {
-        source.set(
+        source.set::<(ConfirmedV, ArrivesAt)>(
             confirmed_v,
             confirmed_v_ahead,
             confirmed_v_changed,
             confirmed_v_present,
-            reads,
         )
     };
     server_app.connect_client(&mut client_app);

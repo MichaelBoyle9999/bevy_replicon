@@ -167,14 +167,16 @@ unsafe impl SystemParam for ReplicationQuery<'_, '_> {
         debug!("initializing with {} replication rules", rules.len());
         for rule in rules.iter() {
             for component in &rule.components {
-                component_access.add_component_read(component.id);
+                component_access
+                    .access_mut()
+                    .add_component_read(component.id);
             }
         }
 
-        let mut source = world.resource_mut::<ConfirmedReplicationSource>();
-        for &id in source.declare_reads() {
-            component_access.add_component_read(id);
-        }
+        let declare_reads = world
+            .resource_mut::<ConfirmedReplicationSource>()
+            .latch_reads();
+        declare_reads(world, component_access.access_mut());
 
         Self::State { component_access }
     }
@@ -209,9 +211,8 @@ unsafe impl SystemParam for ReplicationQuery<'_, '_> {
 unsafe impl ReadOnlySystemParam for ReplicationQuery<'_, '_> {}
 
 pub(crate) struct ReplicationQueryState {
-    /// All replicated components and the confirmed source's reads.
-    ///
-    /// Used only in debug to check component access.
+    /// All replicated components and the confirmed source's reads, the
+    /// replication systems' declared access.
     component_access: FilteredAccess,
 }
 
@@ -287,6 +288,42 @@ mod tests {
     }
 
     #[test]
+    #[should_panic]
+    fn query_on_entities_another_rule_skips() {
+        let mut app = App::new();
+        app.insert_resource(ConfirmedReplicationSource::unset())
+            .init_resource::<ReplicationRegistry>()
+            .init_resource::<ProtocolHasher>()
+            .init_resource::<ReplicationRules>()
+            .replicate::<Test>()
+            .replicate::<Other>()
+            .add_systems(
+                Update,
+                |_: ReplicationQuery, _: Query<&mut Test, Without<Other>>| {},
+            );
+
+        app.update();
+    }
+
+    #[test]
+    #[should_panic(expected = "History in a way that conflicts")]
+    fn source_read_on_entities_without_a_replicated_component() {
+        let mut app = App::new();
+        app.insert_resource(ConfirmedReplicationSource::unset())
+            .init_resource::<ReplicationRegistry>()
+            .init_resource::<ProtocolHasher>()
+            .init_resource::<ReplicationRules>()
+            .replicate::<Test>()
+            .add_systems(
+                Update,
+                |_: ReplicationQuery, _: Query<&mut History, Without<Test>>| {},
+            );
+        install_history_source(app.world_mut());
+
+        app.update();
+    }
+
+    #[test]
     #[should_panic(expected = "before the replication systems initialize")]
     fn source_installed_after_initialization() {
         let mut app = App::new();
@@ -299,10 +336,9 @@ mod tests {
     }
 
     fn install_history_source(world: &mut World) {
-        let history_id = world.register_component::<History>();
         let mut source = world.resource_mut::<ConfirmedReplicationSource>();
-        // SAFETY: the lookups read nothing.
-        unsafe { source.set(live, nothing_ahead, unchanged, present, [history_id]) };
+        // SAFETY: the lookups read nothing; `History` is declared for the conflict tests to catch.
+        unsafe { source.set::<History>(live, nothing_ahead, unchanged, present) };
     }
 
     unsafe fn live<'w>(
@@ -339,6 +375,9 @@ mod tests {
 
     #[derive(Component, Serialize, Deserialize)]
     struct Test;
+
+    #[derive(Component, Serialize, Deserialize)]
+    struct Other;
 
     #[derive(Component)]
     struct History;
